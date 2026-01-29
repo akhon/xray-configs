@@ -1,4 +1,4 @@
-# Xcore UUID Rotation Script (OpenWrt)
+# Xcore/Xray UUID Rotation Script (OpenWrt)
 
 This repository contains Xcore/Xray configuration files and a **UUID rotation helper script** designed for OpenWrt-based systems.
 
@@ -38,9 +38,9 @@ The script is intentionally lightweight and compatible with:
 
 ```text
 scripts/
-  xcore_uuid_rotate.py   # rotation script (no credentials)
+  xray_uuid_rotate.py   # rotation script (no credentials)
 /etc/xray/config.json   # actual runtime config
-/etc/xcore/uuid_state.json  # generated runtime state (not in git)
+/etc/xray/uuid_state.json  # generated runtime state (not in git)
 ```
 
 ---
@@ -164,7 +164,7 @@ Use the **negative ID** (`-100...`).
 Manual run:
 
 ```sh
-python3 /usr/bin/xcore_uuid_rotate.py
+python3 /usr/bin/xray_uuid_rotate.py
 ```
 
 ---
@@ -178,7 +178,7 @@ crontab -e
 ```
 
 ```cron
-15 3 * * * /usr/bin/xcore_uuid_rotate.py
+15 3 * * * /usr/bin/xray_uuid_rotate.py
 ```
 
 ---
