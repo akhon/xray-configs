@@ -6,18 +6,13 @@ import subprocess
 import datetime
 from pathlib import Path
 
-# NOTE: This version keeps the exact same logic as the original:
-# - Every ROTATION_INTERVAL_DAYS: generate + add a new UUID, restart service, notify Telegram
-# - Every run: remove UUIDs older than GRACE_PERIOD_DAYS, restart service if changed, notify Telegram
-# - State is stored locally in STATE_FILE so reboots are safe
-
 # ================== SETTINGS ==================
 
 XRAY_CONFIG = "/etc/xray/config.json"
 STATE_FILE = "/etc/xcore/uuid_state.json"
 XRAY_SERVICE = "xray"
 
-TELEGRAM_BOT_TOKEN = "BOT:TOKEN"
+TELEGRAM_BOT_TOKEN = "BOT_TOKEN"
 TELEGRAM_CHAT_ID = "CHAT_OR_CHANNEL_ID"
 
 ROTATION_INTERVAL_DAYS = 30
@@ -50,7 +45,6 @@ def telegram_send(text):
     Sends a Telegram message using curl.
     This avoids requiring python3-requests on OpenWrt.
     """
-    # Use --data-urlencode to preserve newlines and special characters
     subprocess.run(
         [
             "curl", "-s",
@@ -74,15 +68,13 @@ def save_xray_config(cfg):
         json.dump(cfg, f, indent=2)
 
 def get_clients(cfg):
-    # Keep original assumption: clients live here
+    # Assumption: UUIDs live here
     return cfg["inbounds"][0]["settings"]["clients"]
 
 def add_uuid(cfg, new_uuid):
-    # Append a new client record
     get_clients(cfg).append({"id": new_uuid})
 
 def remove_uuid(cfg, old_uuid):
-    # Filter out the UUID
     clients = get_clients(cfg)
     cfg["inbounds"][0]["settings"]["clients"] = [
         c for c in clients if c.get("id") != old_uuid
@@ -92,69 +84,93 @@ def remove_uuid(cfg, old_uuid):
 
 def main():
     state = load_json(STATE_FILE, {
-        "active": [],          # list of {uuid, created, expires}
-        "last_rotation": None  # ISO timestamp
+        "current_uuid": None,
+        "pending_removals": [],   # list of {uuid, remove_at}
+        "last_rotation": None
     })
 
     cfg = load_xray_config()
     clients = get_clients(cfg)
-    current_uuids = {c["id"] for c in clients if "id" in c}
+    current_uuids = [c["id"] for c in clients if "id" in c]
+    current_set = set(current_uuids)
 
     now_ts = now()
 
-    # ---- Step 1: Add a new UUID on schedule ----
-    if (not state["last_rotation"]) or \
-       ((now_ts - datetime.datetime.fromisoformat(state["last_rotation"])).days >= ROTATION_INTERVAL_DAYS):
+    # Bootstrap: if state has no current_uuid, infer it from config
+    # (use the last UUID in clients[] as "current")
+    if not state["current_uuid"] and current_uuids:
+        state["current_uuid"] = current_uuids[-1]
+        save_json(STATE_FILE, state)
 
+    # ---- Step 1: Scheduled rotation -> add new UUID, schedule old "current" for removal ----
+    do_rotate = False
+    if not state["last_rotation"]:
+        do_rotate = True
+    else:
+        last = datetime.datetime.fromisoformat(state["last_rotation"])
+        if (now_ts - last).days >= ROTATION_INTERVAL_DAYS:
+            do_rotate = True
+
+    if do_rotate:
         new_uuid = str(uuid.uuid4())
         add_uuid(cfg, new_uuid)
 
         created = now_ts
-        expires = created + datetime.timedelta(days=GRACE_PERIOD_DAYS)
+        remove_at = created + datetime.timedelta(days=GRACE_PERIOD_DAYS)
 
-        state["active"].append({
-            "uuid": new_uuid,
-            "created": created.isoformat(),
-            "expires": expires.isoformat()
-        })
+        old_uuid = state.get("current_uuid")
+        # Schedule removal ONLY for the old current UUID
+        if old_uuid and old_uuid != new_uuid:
+            state["pending_removals"].append({
+                "uuid": old_uuid,
+                "remove_at": remove_at.isoformat()
+            })
+
+        state["current_uuid"] = new_uuid
         state["last_rotation"] = created.isoformat()
 
         save_xray_config(cfg)
         restart_xray()
 
-        telegram_send(
+        msg = (
             "🆕 *New UUID added*\n\n"
             f"`{new_uuid}`\n\n"
             f"📅 Created (UTC): {created.date()}\n"
-            f"⏳ Old UUID removal date (UTC): {expires.date()}"
         )
+        if old_uuid:
+            msg += f"⏳ Old UUID will be removed (UTC): {remove_at.date()}\n"
+        telegram_send(msg)
 
-    # ---- Step 2: Remove expired UUIDs (grace period passed) ----
+    # ---- Step 2: Remove UUIDs that are explicitly scheduled for removal ----
     changed = False
-    still_active = []
+    still_pending = []
 
-    for entry in state["active"]:
-        exp = datetime.datetime.fromisoformat(entry["expires"])
+    for entry in state["pending_removals"]:
+        ra = datetime.datetime.fromisoformat(entry["remove_at"])
+        u = entry["uuid"]
 
-        if now_ts >= exp:
-            old_uuid = entry["uuid"]
-            if old_uuid in current_uuids:
-                remove_uuid(cfg, old_uuid)
+        if now_ts >= ra:
+            # Never remove the current UUID, even if somehow scheduled
+            if u == state.get("current_uuid"):
+                still_pending.append(entry)
+                continue
+
+            if u in current_set:
+                remove_uuid(cfg, u)
                 changed = True
-
                 telegram_send(
                     "🗑 *UUID removed*\n\n"
-                    f"`{old_uuid}`\n"
+                    f"`{u}`\n"
                     f"📅 Removed (UTC): {now_ts.date()}"
                 )
         else:
-            still_active.append(entry)
+            still_pending.append(entry)
 
     if changed:
         save_xray_config(cfg)
         restart_xray()
 
-    state["active"] = still_active
+    state["pending_removals"] = still_pending
     save_json(STATE_FILE, state)
 
 if __name__ == "__main__":
