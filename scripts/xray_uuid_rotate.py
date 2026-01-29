@@ -9,11 +9,11 @@ from pathlib import Path
 # ================== SETTINGS ==================
 
 XRAY_CONFIG = "/etc/xray/config.json"
-STATE_FILE = "/etc/xcore/uuid_state.json"
+STATE_FILE = "/etc/xray/uuid_state.json"
 XRAY_SERVICE = "xray"
 
-TELEGRAM_BOT_TOKEN = "BOT_TOKEN"
-TELEGRAM_CHAT_ID = "CHAT_OR_CHANNEL_ID"
+TELEGRAM_BOT_TOKEN = "PUT_YOUR_BOT_TOKEN_HERE"
+TELEGRAM_CHAT_ID = "PUT_YOUR_CHANNEL_ID_HERE"
 
 ROTATION_INTERVAL_DAYS = 30
 GRACE_PERIOD_DAYS = 14
