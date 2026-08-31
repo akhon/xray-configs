@@ -1,0 +1,44 @@
+{
+  "log": {
+    #"access": "/tmp/xray-access.log",
+    #"error": "/tmp/xray-error.log",
+    "loglevel": "debug"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "UUID", # xray uuid
+            "flow": ""
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "cloudflare.com:443",
+          "xver": 0,
+          "serverNames": [
+            "cloudflare.com"
+          ],
+          "privateKey": "privateKey", # xray x25519
+          "shortIds": [
+            "shortId1" # openssl rand -hex 8
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
