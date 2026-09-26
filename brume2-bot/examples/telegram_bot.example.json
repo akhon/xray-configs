@@ -1,0 +1,9 @@
+{
+  "bot_token": "REPLACE_WITH_TELEGRAM_BOT_TOKEN",
+  "allowed_chat_ids": [
+    0
+  ],
+  "allowed_user_ids": [
+    0
+  ]
+}

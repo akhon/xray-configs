@@ -1,0 +1,62 @@
+# Python and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*.swo
+
+# Local environment and runtime state
+.env
+*.log
+*.pid
+*.lock
+*.offset
+uuid_state.json
+telegram_stats_report_state.json
+backups/
+router_snapshot/
+crontabs/
+
+# Live router and bot configuration
+telegram_bot.json
+config.json
+xray_config.json
+config.local.json
+config.json.local
+config.json.candidate.*
+
+# Generated client exports contain active credentials
+brume2-streisand*.json
+streisand*.json
+*-streisand.json
+
+# Keys, certificates, and SSH material
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+*.pub
+authorized_keys
+known_hosts
+id_*
+*_ed25519
+*_rsa
+
+# Backups, snapshots, and temporary files
+*.tmp
+*.candidate.*
+*.bak
+*.backup
+*.snapshot
+*~
+DEPLOYMENT.md
+deployment.local.*

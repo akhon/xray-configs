@@ -11,9 +11,40 @@ The goal of this repo:
 
 ## Contents
 
+- `brume2-bot/` — Telegram bot, Streisand JSON exports, per-user statistics, and weekly reports ([documentation](brume2-bot/README.md))
 - `xray-core-vless-reality.json` — VLESS + REALITY (experimental, environment-dependent)
 - `xray-core-vmess-ja3-working.json` — VMess + TLS (JA3 / HTTPS camouflage, working setup)
 - `xray-core-vmess-working.json` — VMess + TCP without TLS (baseline, most stable)
+
+---
+
+## Brume 2 Telegram bot and user statistics
+
+The [bot package](brume2-bot/README.md) adds Telegram management, Streisand JSON export, per-user traffic statistics, and weekly reports to an existing OpenWrt Xray installation.
+
+- `/stats` or `/stats alice` reports upload, download, total traffic, and recent request activity.
+- `/streisand` or `/streisand alice` exports complete client profiles as JSON.
+- `/ip`, `/status`, `/restart`, `/rotate`, `/target`, and `/tlsping` provide allowlisted administration.
+- A router cron job can publish a weekly statistics snapshot to the authorized Telegram chats.
+
+Each person needs a separate credential for separate counters. The migration helper can add individual profiles while preserving an existing shared UUID. Configuration changes use validation, backups, atomic writes, and rollback.
+
+Traffic counters are cumulative since Xray's last restart; the online indicator describes recent activity, not an exact active-session count. StatsService is accessible only on the router's loopback interface.
+
+After installation on the router:
+
+```sh
+xray-user-stats
+xray-user-stats alice
+```
+
+Run the package tests from this repository:
+
+```sh
+python3 -m unittest discover -s brume2-bot/tests -v
+```
+
+See the [package README](brume2-bot/README.md) for installation, access controls, safe migration, certificate-pinned JSON exports, and the weekly schedule. Keep populated router configurations, generated client profiles, keys, tokens, and private deployment notes out of this public repository.
 
 ---
 
@@ -42,7 +73,7 @@ uuidgen
 
 Example UUID:
 ```
-c4afbef9-5658-465a-b272-4cec5d41c23d
+11111111-1111-4111-8111-111111111111
 ```
 
 Used in config as:
@@ -200,4 +231,3 @@ If REALITY does not work, it is usually **not a config issue**.
 ## License
 
 Use at your own risk.
-

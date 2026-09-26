@@ -1,0 +1,43 @@
+# Local development artifacts
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.env
+.env.*
+
+# Live router secrets and runtime state (commit templates only)
+telegram_bot.json
+telegram_bot.offset
+telegram_stats_report_state.json
+uuid_state.json
+config.json
+config.local.json
+backups/
+router_snapshot/
+brume2-streisand*.json
+streisand*.json
+
+# Private keys and credentials
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*_ed25519
+*_rsa
+
+# Runtime and temporary files
+*.log
+*.pid
+*.lock
+*.tmp
+*.bak
+
+# Private installation records
+DEPLOYMENT.md
+deployment.local.*
