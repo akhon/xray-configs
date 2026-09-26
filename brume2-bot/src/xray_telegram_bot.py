@@ -22,11 +22,12 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 import requests
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 XRAY_CONFIG = Path("/etc/xray/config.json")
 BOT_CONFIG = Path("/etc/xray/telegram_bot.json")
@@ -1278,6 +1279,77 @@ def build_streisand_document(cfg, address, user_filter=None):
     return document
 
 
+def build_share_links_document(cfg, address, user_filter=None):
+    """Derive conventional share links from the same verified JSON profiles.
+
+    VMess certificate pin import uses the pcs extension. Clients without that
+    extension should import the JSON export and keep TLS verification enabled.
+    """
+    profiles = json.loads(build_streisand_document(cfg, address, user_filter))
+    links = []
+    for profile in profiles:
+        outbound = profile["outbounds"][0]
+        destination = outbound["settings"]["vnext"][0]
+        user = destination["users"][0]
+        stream = outbound["streamSettings"]
+        if outbound["protocol"] == "vmess":
+            tls = stream["tlsSettings"]
+            share = {
+                "v": "2",
+                "ps": profile["remarks"],
+                "add": destination["address"],
+                "port": str(destination["port"]),
+                "id": user["id"],
+                "aid": str(user["alterId"]),
+                "scy": user["security"],
+                "net": stream["network"],
+                "type": "none",
+                "host": "",
+                "path": "",
+                "tls": "tls",
+                "sni": tls["serverName"],
+                "alpn": ",".join(tls.get("alpn", [])),
+                "fp": tls["fingerprint"],
+                "pcs": tls["pinnedPeerCertSha256"],
+                "insecure": "0",
+            }
+            encoded = base64.b64encode(
+                json.dumps(share, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).decode("ascii")
+            links.append("vmess://" + encoded)
+        elif outbound["protocol"] == "vless":
+            reality = stream["realitySettings"]
+            query = {
+                "encryption": user["encryption"],
+                "security": "reality",
+                "sni": reality["serverName"],
+                "fp": reality["fingerprint"],
+                "pbk": reality["publicKey"],
+                "sid": reality["shortId"],
+                "type": stream["network"],
+                "headerType": "none",
+                "spx": reality["spiderX"],
+            }
+            if user.get("flow"):
+                query["flow"] = user["flow"]
+            address_value = destination["address"]
+            if ipaddress.ip_address(address_value).version == 6:
+                address_value = "[" + address_value + "]"
+            links.append(
+                "vless://%s@%s:%s?%s#%s"
+                % (
+                    quote(user["id"], safe=""),
+                    address_value,
+                    destination["port"],
+                    urlencode(query, quote_via=quote),
+                    quote(profile["remarks"], safe=""),
+                )
+            )
+        else:
+            raise OperationError("Share-link export contains an unsupported protocol")
+    return "\n".join(links) + "\n"
+
+
 class TelegramClient:
     def __init__(self, token):
         self.base_url = "https://api.telegram.org/bot%s/" % token
@@ -1351,6 +1423,7 @@ HELP_TEXT = """Brume 2 Xray commands
 
 /ip — show the router's current public IP
 /streisand [user] — export configured client profiles as JSON
+/links [user] — export client share links as a text file
 /stats [user] — show per-user traffic and online status when available
 /rotate — begin safe VMess/VLESS UUID rotation
 /restart — validate and restart Xray
@@ -1422,6 +1495,18 @@ class Bot:
             document,
             caption,
             "application/json",
+        )
+
+    def send_links(self, chat_id, user_filter=None):
+        cfg = load_xray_config()
+        document = build_share_links_document(cfg, get_public_ip(), user_filter)
+        self.telegram.send_document(
+            chat_id,
+            "brume2-streisand-links.txt",
+            document,
+            "Share links. If your client cannot import the certificate pin, use "
+            "/streisand [label] JSON; keep TLS verification enabled.",
+            "text/plain",
         )
 
     def command_status(self, chat_id, reply_to):
@@ -1586,6 +1671,10 @@ class Bot:
                 self.send_profile(
                     chat_id, "Current Streisand profiles", arguments[0] if arguments else None
                 )
+            elif command == "/links":
+                if len(arguments) > 1:
+                    raise UserError("Usage: /links [user label]")
+                self.send_links(chat_id, arguments[0] if arguments else None)
             elif command == "/stats":
                 self.command_stats(chat_id, reply_to, arguments)
             elif command == "/rotate":

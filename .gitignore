@@ -18,6 +18,8 @@ backups/
 router_snapshot/
 brume2-streisand*.json
 streisand*.json
+brume2-streisand*.txt
+streisand*.txt
 
 # Private keys and credentials
 *.key

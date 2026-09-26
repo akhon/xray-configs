@@ -24,6 +24,7 @@ The [bot package](brume2-bot/README.md) adds Telegram management, Streisand JSON
 
 - `/stats` or `/stats alice` reports upload, download, total traffic, and recent request activity.
 - `/streisand` or `/streisand alice` exports complete client profiles as JSON.
+- `/links` or `/links alice` provides a secondary VMess/VLESS share-link text format.
 - `/ip`, `/status`, `/restart`, `/rotate`, `/target`, and `/tlsping` provide allowlisted administration.
 - A router cron job can publish a weekly statistics snapshot to the authorized Telegram chats.
 

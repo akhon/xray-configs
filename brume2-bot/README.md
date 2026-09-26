@@ -50,6 +50,7 @@ The repository's legacy `scripts/` rotation helper is a separate workflow; it is
 | `/ip` | Show the router's public IP. |
 | `/stats [label]` | Show traffic and recent activity for all users or a selected user. |
 | `/streisand [label]` | Send selected client profiles as a JSON document. |
+| `/links [label]` | Send standard VMess/VLESS share links as a text document. |
 | `/rotate` then `/rotate confirm` | Rotate all managed UUIDs, including shared profiles, after confirmation. |
 | `/restart` | Validate and restart Xray; report listener health. |
 | `/target hostname` | Check and update the REALITY target/SNI when configured. |
@@ -107,6 +108,14 @@ Recent activity is not an active-session count; long-lived streams can appear in
 Exports are JSON arrays of complete Xray client profiles. Each configured client has its own entry. VMess profiles pin the installed leaf TLS certificate using `pinnedPeerCertSha256`; they do not enable `allowInsecure`. Regenerate those profiles after replacing the server certificate.
 
 REALITY exports include its public client parameters when configured. Server private keys, server-only targets, certificate/key file paths, and bot tokens are excluded. Generated JSON nevertheless contains active client UUIDs and endpoint details: treat it as credential material and keep it out of Git.
+
+### Secondary share-link format
+
+`/links` sends all profiles as one `brume2-streisand-links.txt` file; `/links alice` selects one label. The file contains one `vmess://` or `vless://` URI per line for clients that import share links. The JSON command remains available unchanged.
+
+VMess links use the conventional Base64-encoded payload, including the existing certificate fingerprint in the `pcs` extension used by [v2rayN's VMess share format](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/VmessFmt.cs). Streisand's link importer support for `pcs` has not been verified. If a link import fails certificate validation, use `/streisand alice` for the JSON profile; keep TLS verification enabled. REALITY links include the selected public key, short ID, SNI, fingerprint, and flow when configured.
+
+Share links contain the same active client credentials as JSON exports. Keep the text files out of this public repository too.
 
 ## Weekly reports
 

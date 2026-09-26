@@ -36,6 +36,9 @@ config.json.candidate.*
 brume2-streisand*.json
 streisand*.json
 *-streisand.json
+brume2-streisand*.txt
+streisand*.txt
+*-streisand.txt
 
 # Keys, certificates, and SSH material
 *.key
