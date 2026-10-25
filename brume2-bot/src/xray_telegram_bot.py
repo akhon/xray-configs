@@ -27,7 +27,7 @@ from urllib.parse import quote, urlencode
 import requests
 
 
-VERSION = "1.3.0"
+VERSION = "1.8.0"
 
 XRAY_CONFIG = Path("/etc/xray/config.json")
 BOT_CONFIG = Path("/etc/xray/telegram_bot.json")
@@ -39,6 +39,7 @@ UUID_STATE_FILE = Path("/etc/xray/uuid_state.json")
 
 XRAY_BIN = "/usr/bin/xray"
 XRAY_SERVICE = "/etc/init.d/xray"
+HYSTERIA_SERVICE = "/etc/init.d/hysteria2"
 
 TOKEN_RE = re.compile(r"[0-9]{6,12}:[A-Za-z0-9_-]{25,}")
 UUID_RE = re.compile(
@@ -75,6 +76,9 @@ class Settings:
     bot_token: str
     allowed_chat_ids: frozenset
     allowed_user_ids: frozenset
+    vmess_enabled: bool = False
+    private_owner_id: int = None
+    private_hysteria_users: frozenset = frozenset()
 
 
 def utc_now():
@@ -236,9 +240,22 @@ def load_xray_config():
 
 def load_settings():
     try:
-        raw = json.loads(BOT_CONFIG.read_text(encoding="utf-8"))
+        with BOT_CONFIG.open("rb") as handle:
+            payload = handle.read(64 * 1024 + 1)
+        if len(payload) > 64 * 1024:
+            raise ValueError()
+        raw = json.loads(payload.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                         parse_constant=reject_nonfinite)
     except Exception as exc:
         raise OperationError("Cannot read the Telegram bot settings") from exc
+
+    if not isinstance(raw, dict):
+        raise OperationError("Telegram bot settings must be an object")
+    try:
+        from vpn_features import parse_vmess_enabled
+        vmess_enabled = parse_vmess_enabled(raw)
+    except (ImportError, ValueError) as exc:
+        raise OperationError("Telegram VPN feature settings are invalid or unavailable") from exc
 
     token = raw.get("bot_token")
     chats = raw.get("allowed_chat_ids")
@@ -249,12 +266,21 @@ def load_settings():
         raise OperationError("Telegram chat allowlist is empty")
     if not isinstance(users, list):
         raise OperationError("Telegram user allowlist is malformed")
-    try:
-        chat_ids = frozenset(int(item) for item in chats)
-        user_ids = frozenset(int(item) for item in users)
-    except (TypeError, ValueError) as exc:
-        raise OperationError("Telegram allowlist contains a non-numeric ID") from exc
-    return Settings(token, chat_ids, user_ids)
+    owner = raw.get("private_owner_id")
+    private_users = raw.get("private_hysteria_users", [])
+    if (any(type(item) is not int or item >= 0 for item in chats)
+            or not users or any(type(item) is not int or item <= 0 for item in users)):
+        raise OperationError("Use negative group IDs and explicit positive sender IDs")
+    if owner is not None and (type(owner) is not int or owner <= 0 or owner not in users):
+        raise OperationError("Private owner must be an explicitly allowed sender ID")
+    if (not isinstance(private_users, list) or len(private_users) > 1024
+            or any(not isinstance(item, str) or not PROFILE_LABEL_RE.fullmatch(item)
+                   or UUID_RE.search(item) for item in private_users)):
+        raise OperationError("Private Hysteria users must be account names")
+    private_users = frozenset(item.casefold() for item in private_users)
+    if owner is not None and not private_users:
+        raise OperationError("Configure private Hysteria users before enabling private access")
+    return Settings(token, frozenset(chats), frozenset(users), vmess_enabled, owner, private_users)
 
 
 def inbound_user_list(inbound):
@@ -1062,6 +1088,80 @@ def reality_profile(cfg, client_index=0):
     }
 
 
+def match_certificate_hostname(certificate, hostname):
+    matcher = getattr(ssl, "match_hostname", None)
+    if matcher is not None:
+        return matcher(certificate, hostname)
+    # Python 3.12+ removed the stdlib helper. Preserve its CN fallback semantics.
+    from urllib3.util.ssl_match_hostname import match_hostname
+    return match_hostname(certificate, hostname, hostname_checks_common_name=True)
+
+
+def vmess_tls_certificate(tls):
+    certificates = tls.get("certificates") or []
+    if not isinstance(certificates, list) or not certificates:
+        raise OperationError("VMess TLS certificate is missing")
+
+    configured_sni = tls.get("serverName")
+    if configured_sni not in (None, ""):
+        try:
+            if not isinstance(configured_sni, str):
+                raise UserError("Invalid hostname type")
+            configured_sni = normalize_hostname(configured_sni)
+        except UserError as exc:
+            raise OperationError("Configured VMess TLS serverName is invalid") from exc
+    else:
+        configured_sni = ""
+
+    # Without an explicit name, retain the first-certificate export behavior.
+    candidates = certificates if configured_sni else certificates[:1]
+    if configured_sni and any(
+        isinstance(entry, dict) and str(entry.get("usage", "")).lower() == "issue"
+        for entry in certificates
+    ):
+        raise OperationError("VMess export does not support dynamically issued certificates")
+    selected = None
+    first_certificate = None
+    for entry in candidates:
+        if not isinstance(entry, dict):
+            raise OperationError("VMess TLS certificate is missing")
+        if configured_sni and str(entry.get("usage", "")).lower() == "verify":
+            continue
+        certificate_file = entry.get("certificateFile")
+        if not isinstance(certificate_file, str) or not certificate_file:
+            raise OperationError("VMess TLS certificate path is missing")
+        try:
+            decoded = ssl._ssl._test_decode_cert(certificate_file)
+        except Exception as exc:
+            raise OperationError("VMess TLS certificate could not be decoded") from exc
+        if first_certificate is None:
+            first_certificate = (certificate_file, decoded)
+        if configured_sni:
+            # Match Xray's ordered CN/SAN selection, then enforce hostname
+            # validity. A conflicting CN must not shadow a later pinned leaf.
+            names = [value for kind, value in decoded.get("subjectAltName", ()) if kind == "DNS"]
+            names.extend(
+                value for relative_name in decoded.get("subject", ())
+                for key, value in relative_name if key == "commonName"
+            )
+            wildcard = "*." + configured_sni.split(".", 1)[1]
+            if configured_sni not in names and wildcard not in names:
+                continue
+        selected = (certificate_file, decoded)
+        break
+    if selected is None and not tls.get("rejectUnknownSni", False):
+        selected = first_certificate
+    if selected is None:
+        raise OperationError("No VMess TLS certificate matches configured serverName")
+    certificate_file, decoded = selected
+    if configured_sni:
+        try:
+            match_certificate_hostname(decoded, configured_sni)
+        except Exception as exc:
+            raise OperationError("Configured VMess SNI does not match the selected certificate") from exc
+    return certificate_file, decoded, configured_sni
+
+
 def vmess_profile(cfg, client_index=0):
     _index, inbound = primary_inbounds(cfg)["vmess"][0]
     user, canonical_id, label = profile_client(inbound, client_index)
@@ -1072,16 +1172,7 @@ def vmess_profile(cfg, client_index=0):
     if header.get("type", "none") != "none":
         raise OperationError("VMess export does not support this TCP header configuration")
     tls = stream.get("tlsSettings") or {}
-    certificates = tls.get("certificates") or []
-    if not certificates or not isinstance(certificates[0], dict):
-        raise OperationError("VMess TLS certificate is missing")
-    certificate_file = certificates[0].get("certificateFile")
-    if not isinstance(certificate_file, str):
-        raise OperationError("VMess TLS certificate path is missing")
-    try:
-        decoded = ssl._ssl._test_decode_cert(certificate_file)
-    except Exception as exc:
-        raise OperationError("VMess TLS certificate could not be decoded") from exc
+    certificate_file, decoded, configured_sni = vmess_tls_certificate(tls)
     try:
         certificate_pem = Path(certificate_file).read_text(encoding="ascii")
         leaf_match = re.search(
@@ -1097,8 +1188,7 @@ def vmess_profile(cfg, client_index=0):
         raise OperationError("VMess TLS certificate fingerprint could not be derived") from exc
 
     candidates = []
-    configured_sni = tls.get("serverName")
-    if isinstance(configured_sni, str) and configured_sni:
+    if configured_sni:
         candidates.append(configured_sni)
     fallbacks = inbound.get("fallbacks") or []
     if fallbacks and isinstance(fallbacks[0], dict):
@@ -1117,7 +1207,7 @@ def vmess_profile(cfg, client_index=0):
     for candidate in candidates:
         try:
             normalized = normalize_hostname(candidate)
-            ssl.match_hostname(decoded, normalized)
+            match_certificate_hostname(decoded, normalized)
             sni = normalized
             break
         except Exception:
@@ -1381,6 +1471,14 @@ class TelegramClient:
     def get_webhook_info(self):
         return self.request("getWebhookInfo", timeout=(8, 12))
 
+    def set_commands(self, commands, chat_id):
+        return self.request(
+            "setMyCommands",
+            data={"commands": json.dumps(commands),
+                  "scope": json.dumps({"type": "chat", "chat_id": chat_id})},
+            timeout=(8, 12),
+        )
+
     def get_updates(self, offset, timeout_seconds):
         return self.request(
             "getUpdates",
@@ -1410,6 +1508,13 @@ class TelegramClient:
                 payload["reply_parameters"] = json.dumps({"message_id": reply_to})
             self.request("sendMessage", data=payload)
 
+    def send_photo(self, chat_id, name, content, caption="", reply_to=None):
+        payload = {"chat_id": str(chat_id), "caption": caption, "protect_content": "true"}
+        if reply_to is not None:
+            payload["reply_parameters"] = json.dumps({"message_id": reply_to})
+        self.request("sendPhoto", data=payload,
+                     files={"photo": (name, content, "image/png")}, timeout=(10, 30))
+
     def send_document(self, chat_id, name, content, caption="", mime_type="application/octet-stream"):
         self.request(
             "sendDocument",
@@ -1419,12 +1524,32 @@ class TelegramClient:
         )
 
 
-HELP_TEXT = """Brume 2 Xray commands
+VMESS_TELEGRAM_COMMANDS = [
+    {"command": "ip", "description": "Show the router's current public IP"},
+    {"command": "streisand", "description": "Export VMess/REALITY JSON profiles; optional user label"},
+    {"command": "links", "description": "Export VMess/REALITY share links; optional user label"},
+    {"command": "hysteria", "description": "Export pinned Hysteria 2 JSON profiles; optional user label"},
+    {"command": "qr", "description": "Generate a local Hysteria 2 QR for an existing user"},
+    {"command": "hylinks", "description": "Export Hysteria 2 import links; optional user label"},
+    {"command": "stats", "description": "Show Xray and Hysteria 2 per-user stats; optional user label"},
+    {"command": "rotate", "description": "Begin safe VMess/VLESS UUID rotation"},
+    {"command": "restart", "description": "Validate and restart Xray"},
+    {"command": "target", "description": "Validate and change the REALITY target hostname"},
+    {"command": "tlsping", "description": "Check TLS for a hostname"},
+    {"command": "status", "description": "Show Xray listener health"},
+    {"command": "help", "description": "Show command help"},
+]
+
+
+VMESS_HELP_TEXT = """Brume 2 VPN commands
 
 /ip — show the router's current public IP
-/streisand [user] — export configured client profiles as JSON
-/links [user] — export client share links as a text file
-/stats [user] — show per-user traffic and online status when available
+/streisand [user] — export VMess/REALITY client profiles as JSON
+/links [user] — export VMess/REALITY share links as a text file
+/hysteria [user] — export pinned Hysteria 2 client profiles as JSON
+/hylinks [user] — export Hysteria 2 import links; phone import is unverified
+/qr user [hiddify] — get an existing user QR; add hiddify for Hiddify/iOS
+/stats [user] — show Xray and Hysteria 2 per-user traffic and online status
 /rotate — begin safe VMess/VLESS UUID rotation
 /restart — validate and restart Xray
 /target hostname — validate and switch the REALITY target/SNI
@@ -1433,6 +1558,83 @@ HELP_TEXT = """Brume 2 Xray commands
 /help — show this help
 
 UUID rotation requires a second /rotate confirm command within two minutes."""
+
+
+LEGACY_COMMANDS = frozenset({
+    "/streisand", "/links", "/rotate", "/restart", "/target", "/tlsping", "/tls",
+})
+
+TELEGRAM_COMMANDS = [
+    {"command": "ip", "description": "Show the router's current public IP"},
+    {"command": "hysteria", "description": "Export pinned Hysteria 2 JSON profiles; optional user label"},
+    {"command": "qr", "description": "Generate a local Hysteria 2 QR for an existing user"},
+    {"command": "hylinks", "description": "Export Hysteria 2 import links; optional user label"},
+    {"command": "stats", "description": "Show Hysteria 2 per-user stats; optional user label"},
+    {"command": "status", "description": "Show Hysteria 2 service and statistics API health"},
+    {"command": "help", "description": "Show command help"},
+]
+
+HELP_TEXT = """Brume 2 VPN commands
+
+/ip — show the router's current public IP
+/hysteria [user] — export pinned Hysteria 2 client profiles as JSON
+/hylinks [user] — export Hysteria 2 import links; phone import is unverified
+/qr user [hiddify] — get an existing user QR; add hiddify for Hiddify/iOS
+/stats [user] — show Hysteria 2 per-user traffic and connection counts
+/status — show Hysteria 2 service and statistics API health
+/help — show this help"""
+
+
+def telegram_commands(vmess_enabled=False, private=False):
+    commands = [dict(item) for item in (VMESS_TELEGRAM_COMMANDS if vmess_enabled else TELEGRAM_COMMANDS)]
+    if private:
+        for item in commands:
+            if item["command"] == "stats":
+                item["description"] = "Трафик личных пользователей за текущую отчётную неделю"
+    return commands
+
+
+def help_text(vmess_enabled=False, private=False, private_users=()):
+    text = VMESS_HELP_TEXT if vmess_enabled else HELP_TEXT
+    if private:
+        text = "\n".join(
+            "/stats [user] — traffic for private users in the current reporting week"
+            if line.startswith("/stats ") else line for line in text.split("\n"))
+        text += ("\n\nPrivate users: " + ", ".join(sorted(private_users))
+                 + ". Reporting week starts Monday 14:00 UTC."
+                 + "\nPrivate-user credentials and QR codes are never exported through Telegram.")
+    return text
+
+
+def hysteria_health_snapshot():
+    """Only fixed local read-only queries; never echo service output or API secrets."""
+    service = "unknown"
+    try:
+        result = subprocess.run(
+            [HYSTERIA_SERVICE, "running"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            service = "running"
+        elif result.returncode == 1:
+            service = "stopped"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    stats_available = False
+    try:
+        import hysteria_user_stats
+        # No rows means the collector did not query /traffic; do not claim an
+        # API success when no authenticated request has actually succeeded.
+        stats_available = bool(hysteria_user_stats.collect_stats())
+    except Exception:
+        pass
+    return {"service": service, "stats_available": stats_available}
+
+
+def format_hysteria_health(health):
+    return "Hysteria 2: %s\nStatistics API: %s" % (
+        health["service"], "available" if health["stats_available"] else "unavailable",
+    )
 
 
 class Bot:
@@ -1444,22 +1646,25 @@ class Bot:
         self.bot_username = None
 
     def authorized(self, message):
-        chat = message.get("chat") or {}
-        sender = message.get("from") or {}
-        try:
-            chat_id = int(chat.get("id"))
-        except (TypeError, ValueError):
+        if not isinstance(message, dict) or message.get("sender_chat"):
             return False
-        if chat_id not in self.settings.allowed_chat_ids:
+        chat, sender = message.get("chat"), message.get("from")
+        if not isinstance(chat, dict) or not isinstance(sender, dict) or sender.get("is_bot") is True:
             return False
-        if self.settings.allowed_user_ids:
-            try:
-                user_id = int(sender.get("id"))
-            except (TypeError, ValueError):
-                return False
-            if user_id not in self.settings.allowed_user_ids:
-                return False
-        return True
+        chat_id, user_id = chat.get("id"), sender.get("id")
+        if type(chat_id) is not int or type(user_id) is not int or user_id <= 0:
+            return False
+        if chat.get("type") == "private":
+            return chat_id == user_id == self.settings.private_owner_id
+        return (chat.get("type") in ("group", "supergroup") and chat_id < 0
+                and chat_id in self.settings.allowed_chat_ids
+                and user_id in self.settings.allowed_user_ids)
+
+    def menu_targets(self):
+        targets = [(chat, False) for chat in sorted(self.settings.allowed_chat_ids)]
+        if self.settings.private_owner_id is not None:
+            targets.append((self.settings.private_owner_id, True))
+        return targets
 
     def parse_command(self, message):
         text = message.get("text")
@@ -1476,7 +1681,7 @@ class Bot:
         return command, argument_text.split()
 
     def is_mutating_message(self, message):
-        if not self.authorized(message):
+        if not self.settings.vmess_enabled or not self.authorized(message):
             return False
         parsed = self.parse_command(message)
         if not parsed:
@@ -1486,7 +1691,12 @@ class Bot:
             command == "/rotate" and arguments == ["confirm"]
         )
 
+    def require_vmess(self):
+        if not self.settings.vmess_enabled:
+            raise UserError("Legacy VMess/Xray commands are disabled. Use /help for Hysteria 2 commands.")
+
     def send_profile(self, chat_id, caption, user_filter=None):
+        self.require_vmess()
         cfg = load_xray_config()
         document = build_streisand_document(cfg, get_public_ip(), user_filter)
         self.telegram.send_document(
@@ -1498,6 +1708,7 @@ class Bot:
         )
 
     def send_links(self, chat_id, user_filter=None):
+        self.require_vmess()
         cfg = load_xray_config()
         document = build_share_links_document(cfg, get_public_ip(), user_filter)
         self.telegram.send_document(
@@ -1509,7 +1720,74 @@ class Bot:
             "text/plain",
         )
 
+    def send_hysteria_profile(self, chat_id, user_filter=None):
+        try:
+            import hysteria_profiles
+        except ImportError as exc:
+            raise OperationError("The Hysteria profile helper is not installed") from exc
+        try:
+            document = hysteria_profiles.build_document(
+                get_public_ip(), user_filter, excluded_users=self.settings.private_hysteria_users)
+        except hysteria_profiles.ProfileError:
+            raise UserError("Hysteria profiles are unavailable or the user label was not found")
+        self.telegram.send_document(
+            chat_id, "brume2-hysteria2.json", document,
+            "Private Hysteria 2 profiles for Streisand/Xray 26.9.9 or newer. "
+            "Keep the certificate pin and TLS verification enabled.",
+            "application/json",
+        )
+
+    def send_hysteria_links(self, chat_id, user_filter=None):
+        try:
+            import hysteria_profiles
+        except ImportError as exc:
+            raise OperationError("The Hysteria profile helper is not installed") from exc
+        try:
+            document = hysteria_profiles.build_links_document(
+                get_public_ip(), user_filter, excluded_users=self.settings.private_hysteria_users)
+        except hysteria_profiles.ProfileError:
+            raise UserError("Hysteria links are unavailable or the user label was not found")
+        self.telegram.send_document(
+            chat_id, "brume2-hysteria2-links.txt", document,
+            "Private Hysteria 2 import links. Phone/Streisand link import is unverified. "
+            "If your client cannot import the certificate pin, use /hysteria [label] JSON; "
+            "do not enable Allow insecure. Native Hysteria also needs CA trust.",
+            "text/plain",
+        )
+
+    def command_qr(self, chat_id, reply_to, arguments):
+        if (len(arguments) not in (1, 2) or not PROFILE_LABEL_RE.fullmatch(arguments[0])
+                or UUID_RE.search(arguments[0]) or (len(arguments) == 2 and arguments[1] != "hiddify")):
+            raise UserError("Usage: /qr <existing user label> [hiddify]")
+        import hysteria_profiles
+        from vpn_qr import qr_png
+        is_hiddify = len(arguments) == 2
+        try:
+            if is_hiddify:
+                payload = hysteria_profiles.build_hiddify_document(
+                    get_public_ip(), arguments[0], excluded_users=self.settings.private_hysteria_users)
+                content = qr_png(payload, payload_format="hiddify",
+                                 profile_title=arguments[0] + " - Hysteria 2")
+            else:
+                links = hysteria_profiles.build_links_document(
+                    get_public_ip(), arguments[0], excluded_users=self.settings.private_hysteria_users)
+                link, = links.strip().splitlines()
+                content = qr_png(link)
+        except (hysteria_profiles.ProfileError, ValueError):
+            raise UserError("QR unavailable: unknown user or Telegram export is disabled for this user") from None
+        caption = (
+            "Private Hysteria 2 profile for Hiddify. The trusted router certificate is included; "
+            "TLS verification stays enabled. Generated locally on this router."
+            if is_hiddify else
+            "Private Hysteria 2 import link. Generated locally on this router. "
+            "Hiddify users: request /qr <user> hiddify instead. Other importers must preserve the certificate pin. "
+            "Native Hysteria also needs the server CA certificate; keep TLS verification enabled.")
+        self.telegram.send_photo(chat_id, "hysteria2-qr.png", content, caption, reply_to)
+
     def command_status(self, chat_id, reply_to):
+        if not self.settings.vmess_enabled:
+            self.telegram.send_message(chat_id, format_hysteria_health(hysteria_health_snapshot()), reply_to)
+            return
         cfg = load_xray_config()
         status = health_snapshot(cfg)
         target = "not configured"
@@ -1531,19 +1809,43 @@ class Bot:
             not PROFILE_LABEL_RE.fullmatch(arguments[0]) or UUID_RE.search(arguments[0])
         )):
             raise UserError("Usage: /stats [user label]")
+        if chat_id == self.settings.private_owner_id:
+            selected = self.settings.private_hysteria_users
+            if arguments:
+                name = arguments[0].casefold()
+                if name not in selected:
+                    raise UserError("Only configured private users are available in this chat")
+                selected = frozenset({name})
+            try:
+                import vpn_usage_history as history
+                now = utc_now()
+                try:
+                    fresh = history.sample_once()
+                except Exception:
+                    fresh = False
+                summary = history.render_current_week(now, included_users=selected)
+                if not fresh:
+                    summary = "INCOMPLETE HISTORY: fresh counters unavailable.\n" + summary
+            except Exception:
+                raise UserError("Weekly usage history is unavailable") from None
+            self.telegram.send_message(chat_id, summary, reply_to)
+            return
         try:
-            import xray_user_stats
+            import vpn_user_stats
         except ImportError as exc:
             raise OperationError("The statistics helper is not installed") from exc
         try:
-            summary = xray_user_stats.render_summary(
-                arguments[0] if arguments else None, compact=True
+            summary = vpn_user_stats.render_summary(
+                arguments[0] if arguments else None, compact=True,
+                vmess_enabled=self.settings.vmess_enabled,
+                excluded_hysteria_users=self.settings.private_hysteria_users,
             )
-        except xray_user_stats.StatsError:
+        except vpn_user_stats.StatsError:
             raise UserError("Statistics are unavailable or the user label was not found")
         self.telegram.send_message(chat_id, summary, reply_to)
 
     def command_rotate(self, message, arguments):
+        self.require_vmess()
         chat_id = int(message["chat"]["id"])
         message_id = message.get("message_id")
         sender_id = int((message.get("from") or {}).get("id", 0))
@@ -1592,6 +1894,7 @@ class Bot:
         )
 
     def command_restart(self, chat_id, reply_to):
+        self.require_vmess()
         self.telegram.send_message(chat_id, "Validating and restarting Xray…", reply_to)
         health = restart_current_config()
         self.telegram.send_message(
@@ -1601,6 +1904,7 @@ class Bot:
         )
 
     def command_target(self, chat_id, reply_to, arguments):
+        self.require_vmess()
         if len(arguments) != 1:
             raise UserError("Usage: /target hostname")
         required_reality_inbound(load_xray_config())
@@ -1646,23 +1950,24 @@ class Bot:
         chat_id = int(message["chat"]["id"])
         reply_to = message.get("message_id")
 
-        mutating = command in ("/restart", "/target") or (
-            command == "/rotate" and arguments == ["confirm"]
-        )
-        message_date = message.get("date")
-        if mutating and (
-            not isinstance(message_date, int) or message_date < int(time.time()) - 300
-        ):
-            self.telegram.send_message(
-                chat_id,
-                "Stale mutating command rejected; send it again while the bot is online.",
-                reply_to,
-            )
-            return
-
         try:
+            if command in LEGACY_COMMANDS:
+                self.require_vmess()
+            mutating = self.is_mutating_message(message)
+            message_date = message.get("date")
+            if mutating and (
+                not isinstance(message_date, int) or message_date < int(time.time()) - 300
+            ):
+                self.telegram.send_message(
+                    chat_id,
+                    "Stale mutating command rejected; send it again while the bot is online.",
+                    reply_to,
+                )
+                return
             if command in ("/start", "/help"):
-                self.telegram.send_message(chat_id, HELP_TEXT, reply_to)
+                self.telegram.send_message(chat_id, help_text(self.settings.vmess_enabled,
+                    private=chat_id == self.settings.private_owner_id,
+                    private_users=self.settings.private_hysteria_users), reply_to)
             elif command == "/ip":
                 self.telegram.send_message(chat_id, "Public IP: %s" % get_public_ip(), reply_to)
             elif command == "/streisand":
@@ -1675,6 +1980,20 @@ class Bot:
                 if len(arguments) > 1:
                     raise UserError("Usage: /links [user label]")
                 self.send_links(chat_id, arguments[0] if arguments else None)
+            elif command == "/hysteria":
+                if len(arguments) > 1 or (arguments and (
+                    not PROFILE_LABEL_RE.fullmatch(arguments[0]) or UUID_RE.search(arguments[0])
+                )):
+                    raise UserError("Usage: /hysteria [user label]")
+                self.send_hysteria_profile(chat_id, arguments[0] if arguments else None)
+            elif command == "/hylinks":
+                if len(arguments) > 1 or (arguments and (
+                    not PROFILE_LABEL_RE.fullmatch(arguments[0]) or UUID_RE.search(arguments[0])
+                )):
+                    raise UserError("Usage: /hylinks [user label]")
+                self.send_hysteria_links(chat_id, arguments[0] if arguments else None)
+            elif command == "/qr":
+                self.command_qr(chat_id, reply_to, arguments)
             elif command == "/stats":
                 self.command_stats(chat_id, reply_to, arguments)
             elif command == "/rotate":
@@ -1747,6 +2066,13 @@ class Bot:
                 startup_backoff = min(startup_backoff * 2, 60)
         else:
             return
+        # Menus are scoped to the configured groups and the single private owner.
+        # Authorization above remains mandatory even if someone discovers a command.
+        for chat_id, private in self.menu_targets():
+            try:
+                self.telegram.set_commands(telegram_commands(self.settings.vmess_enabled, private), chat_id)
+            except TelegramError:
+                log("telegram-command-menu-failed")
         log("bot-started", "version=%s" % VERSION)
         backoff = 2
         while not self.stop_event.is_set():
@@ -1784,6 +2110,12 @@ def self_test():
     settings = load_settings()
     if not settings.allowed_chat_ids:
         raise OperationError("Chat allowlist is empty")
+    if not settings.vmess_enabled:
+        health = hysteria_health_snapshot()
+        if health["service"] != "running" or not health["stats_available"]:
+            raise OperationError("Hysteria 2 service or statistics API is unavailable")
+        print("self-test ok version=%s" % VERSION)
+        return
     cfg = load_xray_config()
     assert_required_topology(cfg)
     validate_config_path(XRAY_CONFIG)
@@ -1812,16 +2144,18 @@ def self_test():
 def notify_ready():
     settings = load_settings()
     telegram = TelegramClient(settings.bot_token)
-    cfg = load_xray_config()
-    health = health_snapshot(cfg)
-    text = (
-        "Brume 2 Xray bot is updated and running.\n"
-        "Xray status: %s; listeners: %s\n"
-        "Use /help to see the available commands."
-        % (
+    if settings.vmess_enabled:
+        cfg = load_xray_config()
+        health = health_snapshot(cfg)
+        status_text = "Xray status: %s; listeners: %s" % (
             "healthy" if health["running"] and not health["missing_ports"] else "needs attention",
             ", ".join(str(item) for item in health["listening_ports"]) or "none",
         )
+    else:
+        status_text = format_hysteria_health(hysteria_health_snapshot())
+    text = (
+        "Brume 2 VPN bot is updated and running.\n%s\n"
+        "Use /help to see the available commands." % status_text
     )
     for chat_id in settings.allowed_chat_ids:
         telegram.send_message(chat_id, text)
@@ -1829,7 +2163,7 @@ def notify_ready():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Telegram control bot for Brume 2 Xray")
+    parser = argparse.ArgumentParser(description="Telegram control bot for Brume 2 VPN services")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--notify-ready", action="store_true")
     args = parser.parse_args()
