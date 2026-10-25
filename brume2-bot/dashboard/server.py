@@ -123,7 +123,7 @@ class Archive:
         except Exception:
             db.rollback()
             with self.lock:
-                self.error = 'Связь с роутером недоступна. Показан последний сохранённый снимок.'
+                self.error = 'История с роутера недоступна.'
             # Do not expose SSH stderr or any configuration/exception text through HTTP.
         finally:
             db.close()
