@@ -1,6 +1,6 @@
 # Brume 2 VPN Telegram bot
 
-An OpenWrt bot for an existing Hysteria 2 server, with optional legacy Xray support. It provides local QR generation, certificate-verified client exports, persistent weekly traffic accounting, and private owner commands. This package contains source and synthetic configuration examples; it is not a router backup.
+An OpenWrt bot for an existing Hysteria 2 server, with optional legacy Xray support. It provides local QR generation, certificate-verified client exports, persistent weekly traffic accounting, usage trends, a local dashboard, and private owner commands. This package contains source and synthetic configuration examples; it is not a router backup.
 
 ## Runtime and installation
 
@@ -19,6 +19,7 @@ Inspect the running installation first. Back up the affected scripts, configurat
 chmod 700 /usr/bin/xray_telegram_bot.py /usr/bin/xray_stats_report.py
 chmod 700 /usr/bin/hysteria_profiles.py /usr/bin/hysteria_user_stats.py
 chmod 700 /usr/bin/vpn_features.py /usr/bin/vpn_qr.py /usr/bin/vpn_usage_history.py
+chmod 700 /usr/bin/vpn_usage_trends.py /usr/bin/vpn_history_export.py
 chmod 700 /usr/bin/vpn_user_stats.py /usr/bin/xray_user_stats.py /usr/bin/*-user-stats
 chmod 600 /etc/xray/telegram_bot.json /etc/xray/telegram_stats_private.json
 chmod 600 /etc/hysteria2/config.json
@@ -56,7 +57,7 @@ Adding accounts remains an administrator operation outside Telegram. Preserve ex
 
 | Command | Owner's private chat | Existing authorized group |
 | --- | --- | --- |
-| `/stats` | Current reporting-week traffic for the configured private accounts | Shared accounts' counters since service restart/API reset |
+| `/stats` | Current reporting-week traffic and trends for the configured private accounts | Shared accounts' counters since service restart/API reset, plus weekly trends |
 | `/stats account` | One of the configured private accounts | Existing shared-account filter |
 | `/ip` | Current public IP | Same |
 | `/status` | Hysteria service and local stats API health | Same |
@@ -94,6 +95,24 @@ python3 /usr/bin/xray_stats_report.py --private
 ```
 
 Dry runs do not send, sample or write delivery state. `--private` restricts the run to the owner's completed-week report; `--force` bypasses successful-delivery deduplication. Cron stays at Monday 14:00 UTC. Keep the database across upgrades and restarts. Missing historical traffic cannot be reconstructed from a cumulative counter.
+
+## Trends and the local Mac dashboard
+
+Both automatic weekly reports and interactive statistics append a comparison with the **same elapsed interval one week earlier**. Completed weekly reports compare two complete reporting weeks. The owner and group scopes remain separate. Percentages are withheld when either interval has incomplete history, resets, missing samples or missing users; a zero prior interval is reported explicitly instead of dividing by zero. The daily view covers seven UTC dates, ending at the report cutoff. A partial latest day is labeled; absent history remains unknown, never zero. The group command retains the original since-restart counters above the separate weekly trend section.
+
+The router continues to keep its bounded 120-day database in internal storage. No USB drive is required. The optional Mac dashboard copies only counter readings, labels, process epochs and scope metadata over existing SSH. It does not copy bot configuration, authentication credentials, certificates or private keys. Exporting is read-only and does not add router flash writes; the existing minute sampler is unchanged.
+
+Install `src/vpn_history_export.py` alongside the other router modules, then run on the Mac with an existing SSH alias:
+
+```sh
+python3 dashboard/server.py --ssh-host router-alias --data-dir "$HOME/Library/Application Support/BrumeTraffic"
+```
+
+Open `http://127.0.0.1:8765`. The server binds only to loopback, rejects unexpected Host/Origin headers, serves an explicit route allowlist and uses no third-party web assets. SSH uses BatchMode and the Mac's existing configuration/agent; ensure host-key trust is already set up interactively. There is no browser terminal or command execution endpoint. Never change the binding to a public interface without adding authentication.
+
+The process synchronizes approximately every minute. Its SQLite archive (0600 inside a 0700 directory) deduplicates incremental readings and retains them without pruning. Initial catch-up is paginated; interrupted transfers can be retried. Scope metadata is refreshed from the router on each successful sync. Old readings remain available while SSH is unavailable, with a stale-data warning and exact last observation time. Every graph and total uses the same accounting rules as Telegram. The shared view excludes private accounts by raw ID; the private view includes only the configured accounts.
+
+Keep the process running to collect on the Mac. After laptop sleep or shutdown, it catches up from the router's remaining history; an absence longer than the router's retention window can leave gaps. No startup service is installed by this command. Closing the process stops local HTTP and synchronization, but the router's collection, private commands and weekly reports continue independently. Protect the Mac archive as private traffic metadata. The dashboard does not transmit it to any cloud service.
 
 ## Optional legacy Xray support
 

@@ -260,6 +260,10 @@ def render_report(now=None, path=DB_FILE, enabled=None, included_users=None, exc
                          (row['label'], human_bytes(row['up']), human_bytes(row['down']), human_bytes(row['up']+row['down'])))
     lines.extend(['', 'One-minute counter deltas; resets never count prior cumulative traffic.',
                   'An API reset entirely between samples may be undetectable.'])
+    from vpn_usage_trends import build_trends, render_trends
+    trends = build_trends(start, end, path=path, enabled='Xray' in protocols,
+                          included_users=included_users, excluded_users=excluded_users)
+    lines.extend(['', render_trends(trends)])
     message = '\n'.join(lines)
     if len(message) > 3800:
         message = message[:3630].rsplit('\n', 1)[0] + '\nAdditional rows omitted; full history remains on the router.'

@@ -11,7 +11,7 @@ The goal of this repo:
 
 ## Contents
 
-- `brume2-bot/` — Telegram bot, Hysteria QR/client exports, private weekly statistics, and optional legacy Xray support ([documentation](brume2-bot/README.md))
+- `brume2-bot/` — Telegram bot, Hysteria QR/client exports, private weekly statistics, trends and a local dashboard, and optional legacy Xray support ([documentation](brume2-bot/README.md))
 - `xray-core-vless-reality.json` — VLESS + REALITY (experimental, environment-dependent)
 - `xray-core-vmess-ja3-working.json` — VMess + TLS (JA3 / HTTPS camouflage, working setup)
 - `xray-core-vmess-working.json` — VMess + TCP without TLS (baseline, most stable)
@@ -26,6 +26,7 @@ The [bot package](brume2-bot/README.md) manages an existing OpenWrt Hysteria 2 i
 - Authorized groups retain shared-user statistics; private accounts are excluded from their traffic reports and all Telegram credential exports.
 - `/qr label hiddify` generates a QR locally with the trusted public certificate and an importable profile name.
 - Persistent one-minute history produces actual weekly usage, with reset/gap warnings and exact reporting dates. The reporting week starts Monday 14:00 UTC.
+- Like-for-like weekly comparisons and daily charts keep incomplete history visible; an optional loopback dashboard archives counters on the Mac over SSH.
 - Group/sender allowlists and a separate private owner ID enforce access. Telegram cannot create VPN users.
 
 Updated Hysteria server, bot, private-report and cron **examples** are in `brume2-bot/examples/`. They use placeholders; keep actual passwords, Telegram tokens, keys, personal IDs and client profiles on the router or in an authorized private delivery channel.

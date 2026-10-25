@@ -27,7 +27,7 @@ from urllib.parse import quote, urlencode
 import requests
 
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 XRAY_CONFIG = Path("/etc/xray/config.json")
 BOT_CONFIG = Path("/etc/xray/telegram_bot.json")
@@ -1569,7 +1569,7 @@ TELEGRAM_COMMANDS = [
     {"command": "hysteria", "description": "Export pinned Hysteria 2 JSON profiles; optional user label"},
     {"command": "qr", "description": "Generate a local Hysteria 2 QR for an existing user"},
     {"command": "hylinks", "description": "Export Hysteria 2 import links; optional user label"},
-    {"command": "stats", "description": "Show Hysteria 2 per-user stats; optional user label"},
+    {"command": "stats", "description": "Hysteria 2 counters and weekly trends; optional user label"},
     {"command": "status", "description": "Show Hysteria 2 service and statistics API health"},
     {"command": "help", "description": "Show command help"},
 ]
@@ -1580,7 +1580,7 @@ HELP_TEXT = """Brume 2 VPN commands
 /hysteria [user] — export pinned Hysteria 2 client profiles as JSON
 /hylinks [user] — export Hysteria 2 import links; phone import is unverified
 /qr user [hiddify] — get an existing user QR; add hiddify for Hiddify/iOS
-/stats [user] — show Hysteria 2 per-user traffic and connection counts
+/stats [user] — show Hysteria 2 counters, connections and weekly trends
 /status — show Hysteria 2 service and statistics API health
 /help — show this help"""
 
@@ -1598,7 +1598,7 @@ def help_text(vmess_enabled=False, private=False, private_users=()):
     text = VMESS_HELP_TEXT if vmess_enabled else HELP_TEXT
     if private:
         text = "\n".join(
-            "/stats [user] — traffic for private users in the current reporting week"
+            "/stats [user] — traffic and trends for private users in the current reporting week"
             if line.startswith("/stats ") else line for line in text.split("\n"))
         text += ("\n\nPrivate users: " + ", ".join(sorted(private_users))
                  + ". Reporting week starts Monday 14:00 UTC."
@@ -1834,14 +1834,23 @@ class Bot:
             import vpn_user_stats
         except ImportError as exc:
             raise OperationError("The statistics helper is not installed") from exc
+        import vpn_usage_history as history
+        trend_now = utc_now()
+        try:
+            fresh = history.sample_once()
+        except Exception:
+            fresh = False
         try:
             summary = vpn_user_stats.render_summary(
                 arguments[0] if arguments else None, compact=True,
                 vmess_enabled=self.settings.vmess_enabled,
                 excluded_hysteria_users=self.settings.private_hysteria_users,
+                trend_now=trend_now,
             )
         except vpn_user_stats.StatsError:
             raise UserError("Statistics are unavailable or the user label was not found")
+        if not fresh:
+            summary = "INCOMPLETE HISTORY: fresh counters unavailable.\n" + summary
         self.telegram.send_message(chat_id, summary, reply_to)
 
     def command_rotate(self, message, arguments):

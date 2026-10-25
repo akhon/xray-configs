@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock,patch
+from unittest.mock import Mock,patch,ANY
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 import xray_telegram_bot as bot
 import vpn_usage_history as hist
@@ -72,8 +72,8 @@ class PrivateCommands(unittest.TestCase):
         import vpn_user_stats
         with patch.object(vpn_user_stats,'render_summary',return_value='shared stats') as render,patch.object(hist,'sample_once') as sample:
             self.b.handle_message(message(chat=GROUP,kind='supergroup'))
-            render.assert_called_once_with(None,compact=True,vmess_enabled=False,excluded_hysteria_users=PRIVATE)
-            sample.assert_not_called()
+            render.assert_called_once_with(None,compact=True,vmess_enabled=False,excluded_hysteria_users=PRIVATE,trend_now=ANY)
+            sample.assert_called_once()
     def test_menus_are_scoped_and_describe_private_stats(self):
         self.assertEqual(self.b.menu_targets(),[(GROUP,False),(OWNER,True)])
         private=bot.telegram_commands(False,True);group=bot.telegram_commands(False,False)

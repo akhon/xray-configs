@@ -1,0 +1,28 @@
+'use strict';
+let payload=null, scope='shared', protocol='Hysteria 2';
+const $=id=>document.getElementById(id);
+const bytes=n=>{if(n==null)return '—';if(n===0)return '0 B';const units=['B','KiB','MiB','GiB','TiB'];const i=Math.max(0,Math.min(4,Math.floor(Math.log(n)/Math.log(1024))));return (n/1024**i).toLocaleString('ru-RU',{maximumFractionDigits:i?2:0})+' '+units[i];};
+const date=s=>new Date(s).toLocaleString('ru-RU',{timeZone:'UTC',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+const span=d=>date(d.start)+' → '+date(d.end)+' UTC';
+const change=c=>c.status==='incomplete'?'Недостаточно истории':c.status==='new_usage'?'Ранее 0':(c.percent>0?'+':'')+c.percent.toLocaleString('ru-RU',{maximumFractionDigits:1})+'%';
+function text(id,value){$(id).textContent=value;}
+function svg(tag,attrs={},content){const el=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v]of Object.entries(attrs))el.setAttribute(k,v);if(content!=null)el.textContent=content;return el;}
+function chart(days){const root=svg('svg',{viewBox:'0 0 920 280',role:'presentation'});const max=Math.max(1,...days.map(d=>d.bytes||0));const bottom=222,height=172,width=112,left=70;
+ for(let i=0;i<4;i++){const y=bottom-height*i/3;root.append(svg('line',{x1:66,x2:908,y1:y,y2:y,class:'grid'}));root.append(svg('text',{x:58,y:y+4,'text-anchor':'end'},bytes(max*i/3)));}
+ days.forEach((d,i)=>{const x=left+i*width+25;const group=svg('g');const dh=(d.down||0)/max*height,uh=(d.up||0)/max*height;group.append(svg('title',{},`${d.date}: ${bytes(d.bytes)}; загрузка ${bytes(d.down)}, отдача ${bytes(d.up)}; ${d.complete?'история полная':'история неполная'}\n${span(d)}`));
+ if(d.bytes==null){group.append(svg('text',{x:x+22,y:bottom-10,'text-anchor':'middle'},'Нет данных'));}
+ else{group.append(svg('rect',{x,y:bottom-dh,width:44,height:dh,class:'bar-down',rx:2}));group.append(svg('rect',{x,y:bottom-dh-uh,width:44,height:uh,class:'bar-up',rx:2}));if(!d.complete)group.append(svg('rect',{x:x-3,y:bottom-Math.max(dh+uh,5)-3,width:50,height:Math.max(dh+uh,5)+6,rx:3,class:'incomplete'}));group.append(svg('text',{x:x+22,y:bottom-Math.max(dh+uh,5)-10,'text-anchor':'middle'},bytes(d.bytes)));}
+ group.append(svg('text',{x:x+22,y:250,'text-anchor':'middle'},d.date.slice(8)+'.'+d.date.slice(5,7)));root.append(group);});$('chart').replaceChildren(root);$('chart').setAttribute('aria-label',days.map(d=>d.date+': '+bytes(d.bytes)+(d.complete?'':' (неполная история)')).join('; '));}
+function render(){if(!payload)return;const data=payload.data;const age=data?(Date.now()-Date.parse(data.as_of))/1000:Infinity;const stale=!!payload.sync_error||age>180;$('light').classList.toggle('stale',stale);text('sync',data?(stale?'Архив · нет свежих данных':'Обновлено')+' · '+date(data.as_of)+' UTC':'Ожидаем данные');
+ $('empty').hidden=!!data;$('content').hidden=!data;if(!data){if(payload.sync_error)text('empty',payload.sync_error);return;}
+ const current=data.scopes[scope];if(!current.protocols.some(p=>p.name===protocol))protocol=current.protocols[0].name;
+ $('protocol').replaceChildren(...current.protocols.map(p=>{const option=document.createElement('option');option.value=p.name;option.textContent=p.name;return option;}));$('protocol').value=protocol;
+ const p=current.protocols.find(p=>p.name===protocol);text('period',span(current));text('total',bytes(p.current.bytes));text('directions',bytes(p.current.down)+' / '+bytes(p.current.up));text('total-note',p.current.complete?'По минутным показаниям; текущая неделя ещё идёт.':'Только наблюдаемый трафик. Пропущенный объём неизвестен.');text('change',change(p.comparison));text('comparison','С тем же отрезком предыдущей недели: '+bytes(p.previous.bytes));
+ const notices=[];if(stale)notices.push(payload.sync_error||'Последние показания старше трёх минут. Показан сохранённый снимок.');if(!p.current.complete)notices.push('История текущей недели неполная: сбор начался позже, были пропуски или сбросы счётчиков.');if(!p.previous.complete)notices.push('Для предыдущей недели нет полной истории. Процент изменения пока не рассчитывается.');$('warning').hidden=!notices.length;text('warning',notices.join(' '));
+ chart(p.days);text('previous-period','Сравнение: '+date(current.previous_start)+' → '+date(current.previous_end)+' UTC');
+ $('users').replaceChildren(...p.users.map(u=>{const tr=document.createElement('tr');for(const val of[u.label,bytes(u.current),bytes(u.previous),change(u)]){const td=document.createElement('td');td.textContent=val;tr.append(td);}return tr;}));if(!p.users.length){const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=4;td.textContent='Нет восстановимой истории за этот период.';tr.append(td);$('users').append(tr);}
+ text('archive','История с '+date(data.history_start)+' UTC · '+data.samples.toLocaleString('ru-RU')+' показаний в архиве Mac.');}
+for(const name of['shared','private'])$(name).addEventListener('click',()=>{scope=name;for(const id of['shared','private'])$(id).setAttribute('aria-pressed',String(id===scope));render();});
+$('protocol').addEventListener('change',e=>{protocol=e.target.value;render();});
+async function refresh(){try{const response=await fetch('/api/usage',{cache:'no-store'});if(!response.ok)throw new Error('Unavailable');payload=await response.json();render();}catch{if(payload){payload.sync_error='Локальный сервер недоступен. На экране последний снимок.';render();}else{text('empty','Локальный сервер недоступен. Обновите страницу после запуска сервера.');}}}
+refresh();setInterval(refresh,30000);

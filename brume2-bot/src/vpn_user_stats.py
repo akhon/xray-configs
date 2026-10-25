@@ -10,7 +10,7 @@ from vpn_features import FeatureError, load_vmess_enabled, parse_vmess_enabled
 from xray_user_stats import StatsError, UserNotFound, human_bytes
 
 
-MAX_COMPACT_CHARS = 3300
+MAX_COMPACT_CHARS = 7400
 
 
 def _compact_section(name, rows):
@@ -38,7 +38,7 @@ def _compact_section(name, rows):
 
 
 def render_summary(user_filter=None, compact=True, xray_collector=None, hysteria_collector=None,
-                   vmess_enabled=None, excluded_hysteria_users=()):
+                   vmess_enabled=None, excluded_hysteria_users=(), trend_now=None):
     """Return partial results on backend errors; only truly absent Hysteria is omitted.
 
     Exports StatsError for the existing Telegram caller. A failed backend is marked
@@ -79,6 +79,12 @@ def render_summary(user_filter=None, compact=True, xray_collector=None, hysteria
     sections.append(
         "Traffic is since each service restart/API reset, not a weekly delta. Protocol totals are separate."
         if enabled else "Traffic is since the Hysteria service restart/API reset, not a weekly delta.")
+    from vpn_usage_trends import current_trends, render_trends
+    try:
+        sections.append(render_trends(current_trends(now=trend_now, enabled=enabled,
+            excluded_users=excluded_hysteria_users, label_filter=user_filter)))
+    except Exception:
+        sections.append('Тренд недоступен: не удалось прочитать историю. Текущие счётчики показаны выше.')
     result = "\n\n".join(sections)
     if compact and len(result) > MAX_COMPACT_CHARS:
         raise StatsError("Statistics summary is too large; filter by user label.")

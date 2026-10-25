@@ -77,3 +77,8 @@ user-labels.json
 *-credentials.txt
 *-native.json
 *-client.zip
+
+# Local dashboard archive and scope metadata
+dashboard-data/
+usage-archive/
+sync.json

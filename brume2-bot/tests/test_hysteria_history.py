@@ -121,7 +121,7 @@ class BotTests(unittest.TestCase):
         self.config.write_text(json.dumps({'listen':'0.0.0.0:443','tls':{'cert':str(self.certfile),'key':'/test.key'},
            'auth':{'type':'userpass','userpass':{'alice':'Secret-A-123','PrIvAtE-A':'Secret-G-456'}}}))
         self.labels.write_text(json.dumps({'PrIvAtE-A':'private-alias'}))
-        self.patchers=[patch.object(hp,'HYSTERIA_CONFIG',self.config),patch.object(hp,'DEFAULT_LABELS',self.labels),
+        self.patchers=[patch.object(hist,'sample_once',return_value=True),patch.object(hp,'HYSTERIA_CONFIG',self.config),patch.object(hp,'DEFAULT_LABELS',self.labels),
             patch.object(hp,'_certificate_pin',return_value=hashlib.sha256(ssl.PEM_cert_to_DER_cert(self.cert)).hexdigest()),patch.object(bot,'get_public_ip',return_value='203.0.113.10')]
         for p in self.patchers: p.start()
         self.b=bot.Bot(bot.Settings('123456:fake',frozenset({-1}),frozenset({2}),False,
