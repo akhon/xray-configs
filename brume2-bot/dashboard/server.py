@@ -4,7 +4,6 @@ import argparse
 import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -16,6 +15,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import vpn_usage_history as history
 import vpn_usage_trends as trends
+import vpn_history_transfer as transfer
 
 ASSETS = Path(__file__).resolve().parent
 
@@ -28,26 +28,8 @@ def validate(payload):
     users = payload.get('private_users')
     if not isinstance(users, list) or len(users) > 10000 or not all(isinstance(u, str) and 0 < len(u) < 129 for u in users):
         raise ValueError('Invalid scope')
-    rows = payload.get('rows')
-    if not isinstance(rows, list) or len(rows) > 5000:
-        raise ValueError('Invalid row count')
-    for row in rows:
-        if not isinstance(row, list) or len(row) != 5:
-            raise ValueError('Invalid row')
-        t, protocol, epoch, counters, error = row
-        if type(t) not in (int, float) or not math.isfinite(t) or not 0 <= t <= time.time() + 300:
-            raise ValueError('Invalid timestamp')
-        if protocol not in ('Hysteria 2', 'Xray') or not isinstance(epoch, str) or len(epoch) > 200:
-            raise ValueError('Invalid source')
-        if type(error) is not int or error not in (0, 1) or not isinstance(counters, dict):
-            raise ValueError('Invalid counters')
-        for key, value in counters.items():
-            if not isinstance(key, str) or not 0 < len(key) < 129 or not isinstance(value, dict):
-                raise ValueError('Invalid account')
-            if set(value) != {'label', 'up', 'down'} or not isinstance(value['label'], str) or len(value['label']) > 200:
-                raise ValueError('Invalid label')
-            if any(type(value[d]) is not int or not 0 <= value[d] < 2**63 for d in ('up', 'down')):
-                raise ValueError('Invalid counter')
+    transfer.valid_boot_id(payload.get('boot_id'))
+    transfer.validate_rows(payload.get('rows'))
     return payload
 
 
@@ -62,6 +44,7 @@ class Archive:
         self.lock = threading.Lock()
         self.data = None
         self.error = None
+        self.cache_error = None
         self.meta = json.loads(self.meta_path.read_text()) if self.meta_path.exists() else {}
         db = history.connect(self.path)
         db.close()
@@ -85,19 +68,39 @@ class Archive:
         with self.lock:
             self.data = data
 
+    def ssh(self, command, payload=None):
+        result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+            '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2', self.host, command],
+            input=payload, capture_output=True, timeout=45, check=True)
+        if len(result.stdout) > transfer.MAX_BYTES:
+            raise ValueError('Transfer too large')
+        return json.loads(result.stdout)
+
+    def restore_cache(self, db, boot):
+        # No credentials or local paths are sent. The receiver only inserts bounded
+        # counter rows, refuses conflicts and verifies that its boot ID is unchanged.
+        query = db.execute('SELECT t,protocol,epoch,counters,error FROM samples WHERE t>=? ORDER BY t,protocol',
+                           (time.time() - history.RETENTION_DAYS * 86400,))
+        while True:
+            batch = query.fetchmany(transfer.MAX_ROWS)
+            if not batch:
+                break
+            payload = {'version': 1, 'boot_id': boot,
+                       'rows': [[t, p, e, json.loads(c), error] for t, p, e, c, error in batch]}
+            raw = json.dumps(payload, separators=(',', ':'), allow_nan=False).encode()
+            if len(raw) > transfer.MAX_BYTES:
+                raise ValueError('Restore batch too large')
+            result = self.ssh('/usr/bin/python3 /usr/bin/vpn_history_export.py --restore', raw)
+            if result.get('ok') is not True or result.get('boot_id') != boot:
+                raise ValueError('Cache restore not acknowledged')
+
     def sync(self):
         db = history.connect(self.path)
         try:
             cursor = db.execute('SELECT MAX(t) FROM samples').fetchone()[0] or 0.0
             # One row overlaps on each sync. Idempotent inserts recover interrupted transfers.
             for _ in range(100):
-                result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
-                    '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2', self.host,
-                    '/usr/bin/python3 /usr/bin/vpn_history_export.py --since %.17g' % cursor],
-                    capture_output=True, timeout=45, check=True)
-                if len(result.stdout) > 16 * 1024 * 1024:
-                    raise ValueError('Export too large')
-                payload = validate(json.loads(result.stdout))
+                payload = validate(self.ssh('/usr/bin/python3 /usr/bin/vpn_history_export.py --since %.17g' % cursor))
                 for t, protocol, epoch, counters, error in payload['rows']:
                     db.execute('INSERT OR IGNORE INTO samples VALUES (?,?,?,?,?)',
                                (t, protocol, epoch, json.dumps(counters, separators=(',', ':')), error))
@@ -110,7 +113,16 @@ class Archive:
                     raise ValueError('Cursor did not advance')
             else:
                 raise ValueError('Archive catch-up limit reached')
+            restored_boot = self.meta.get('restored_boot_id')
+            cache_error = None
+            if restored_boot != payload['boot_id']:
+                try:
+                    self.restore_cache(db, payload['boot_id'])
+                    restored_boot = payload['boot_id']
+                except Exception:
+                    cache_error = 'Архив Mac обновлён, но временная история бота ещё не восстановлена.'
             self.meta = {k: payload[k] for k in ('private_users', 'vmess_enabled')}
+            self.meta['restored_boot_id'] = restored_boot
             self.meta['last_sync'] = dt.datetime.now(history.UTC).isoformat()
             temporary = self.meta_path.with_suffix('.tmp')
             fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -120,6 +132,7 @@ class Archive:
             self.rebuild()
             with self.lock:
                 self.error = None
+                self.cache_error = cache_error
         except Exception:
             db.rollback()
             with self.lock:
@@ -130,7 +143,7 @@ class Archive:
 
     def snapshot(self):
         with self.lock:
-            return {'data': self.data, 'sync_error': self.error, 'last_sync': self.meta.get('last_sync')}
+            return {'data': self.data, 'sync_error': self.error, 'cache_error': self.cache_error, 'last_sync': self.meta.get('last_sync')}
 
 
 def handler_for(archive, port):

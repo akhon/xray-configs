@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import vpn_usage_history as history
 import vpn_usage_trends as trends
 import vpn_history_export as export
+import vpn_history_transfer as transfer
 import vpn_user_stats as summary
 import hysteria_user_stats as hy
 spec = importlib.util.spec_from_file_location('dashboard', Path(__file__).resolve().parents[1] / 'dashboard/server.py')
@@ -96,6 +97,9 @@ class TrendTests(unittest.TestCase):
 
 class ArchiveTests(unittest.TestCase):
     def setUp(self):
+        self.boot = patch.object(transfer, 'boot_id', return_value='00000000-0000-4000-8000-000000000001')
+        self.boot_mock = self.boot.start()
+        self.addCleanup(self.boot.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name)
         self.config = self.path/'settings.json'
@@ -124,7 +128,11 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):dash.validate(payload)
     def test_archive_idempotent_stale_preserved_and_persistent(self):
         a=dash.Archive(self.path/'mac', 'router-alias')
-        with patch.object(dash.subprocess, 'run', return_value=Mock(stdout=json.dumps(self.payload()).encode())) as call:
+        def rpc(args, **kwargs):
+            payload = json.loads(kwargs['input']) if kwargs.get('input') else None
+            response = export.restore(payload, self.db) if payload else self.payload()
+            return Mock(stdout=json.dumps(response).encode())
+        with patch.object(dash.subprocess, 'run', side_effect=rpc) as call:
             a.sync();a.sync()
             self.assertIn('BatchMode=yes', call.call_args.args[0])
         snapshot=a.snapshot();self.assertEqual(snapshot['data']['samples'], 2)
@@ -138,6 +146,88 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(a.meta_path.stat().st_mode & 0o777, 0o600)
         b=dash.Archive(self.path/'mac', 'router-alias')
         self.assertEqual(b.snapshot()['data'], snapshot['data'])
+    def test_router_reboot_restores_archive_into_ram_without_duplicates(self):
+        a=dash.Archive(self.path/'mac', 'router-alias')
+        def rpc(command, raw=None):
+            if raw is not None:return export.restore(json.loads(raw), self.db)
+            return self.payload(float(command.rsplit(' ',1)[1]))
+        a.ssh=Mock(side_effect=rpc)
+        a.sync()
+        self.assertIsNone(a.snapshot()['cache_error'])
+        self.assertEqual(a.meta['restored_boot_id'], self.boot_mock.return_value)
+        self.db.unlink()  # Simulate loss of /tmp, never touch the real router.
+        self.boot_mock.return_value='00000000-0000-4000-8000-000000000002'
+        s=sample(time.time(),5,epoch='new-boot')
+        history.sample_once(self.db,lambda:[(s[0],'Hysteria 2',s[1],s[2],0)])
+        a.sync();a.sync()
+        db=history.connect(self.db,readonly=True)
+        try:self.assertEqual(db.execute('SELECT COUNT(*) FROM samples').fetchone()[0],3)
+        finally:db.close()
+        self.assertEqual(a.snapshot()['data']['samples'],3)
+        self.assertEqual(a.meta['restored_boot_id'],self.boot_mock.return_value)
+        self.assertIsNone(a.snapshot()['cache_error'])
+        restored=history.read_samples(self.db,0,time.time())['Hysteria 2']
+        self.assertEqual(restored[0][1],'a');self.assertEqual(restored[-1][1],'new-boot')
+    def test_export_and_restore_paginate_with_overlap_without_losing_rows(self):
+        db=history.connect(self.db)
+        base=time.time()-6000
+        rows=[]
+        for i in range(5001):
+            t,e,c,error=sample(base+i,i)
+            rows.append((t,'Hysteria 2',e,json.dumps(c),int(error)))
+        db.executemany('INSERT INTO samples VALUES (?,?,?,?,?)',rows);db.commit();db.close()
+        a=dash.Archive(self.path/'mac','router-alias')
+        def rpc(command,raw=None):
+            if raw:return export.restore(json.loads(raw),self.db)
+            return self.payload(float(command.rsplit(' ',1)[1]))
+        a.ssh=Mock(side_effect=rpc);a.sync()
+        self.assertIsNone(a.snapshot()['sync_error'])
+        self.assertIsNone(a.snapshot()['cache_error'])
+        self.assertEqual(a.snapshot()['data']['samples'],5003)
+        self.assertEqual(sum('--restore' in c.args[0] for c in a.ssh.call_args_list),2)
+        self.assertEqual(sum('--since' in c.args[0] for c in a.ssh.call_args_list),2)
+        a.sync()
+        self.assertEqual(a.snapshot()['data']['samples'],5003)
+        self.assertEqual(sum('--restore' in c.args[0] for c in a.ssh.call_args_list),2)
+
+    def test_failed_restore_keeps_mac_archive_and_retries(self):
+        a=dash.Archive(self.path/'mac','router-alias')
+        def failed(command,raw=None):
+            if raw is not None:raise OSError('sensitive error')
+            return self.payload()
+        a.ssh=Mock(side_effect=failed);a.sync()
+        self.assertEqual(a.snapshot()['data']['samples'],2)
+        self.assertIsNone(a.snapshot()['sync_error'])
+        self.assertIsNotNone(a.snapshot()['cache_error'])
+        self.assertIsNone(a.meta['restored_boot_id'])
+        a.ssh=Mock(side_effect=lambda command,raw=None:export.restore(json.loads(raw),self.db) if raw else self.payload())
+        a.sync();self.assertIsNone(a.snapshot()['cache_error'])
+        self.assertEqual(a.meta['restored_boot_id'],self.boot_mock.return_value)
+    def test_restore_rejects_stale_boot_and_counter_conflicts(self):
+        rows=self.payload()['rows'];before=self.db.read_bytes()
+        payload={'version':1,'boot_id':'00000000-0000-4000-8000-000000000099','rows':rows}
+        with self.assertRaises(ValueError):export.restore(payload,self.db)
+        payload['boot_id']=self.boot_mock.return_value
+        payload['rows'][0][3]['shared']['up']+=1
+        with self.assertRaises(ValueError):export.restore(payload,self.db)
+        self.assertEqual(self.db.read_bytes(),before)
+    def test_restore_is_atomic_and_retains_only_21_days(self):
+        rows=self.payload()['rows']
+        old=json.loads(json.dumps(rows[0]));old[0]=time.time()-22*86400
+        payload={'version':1,'boot_id':self.boot_mock.return_value,'rows':[old]+rows}
+        cache=self.path/'ram.sqlite3';out=export.restore(payload,cache)
+        self.assertEqual(out['inserted'],2)
+        self.assertEqual(export.restore(payload,cache)['inserted'],0)
+        before=cache.read_bytes()
+        fresh=json.loads(json.dumps(rows[-1]));fresh[0]+=30
+        conflict=json.loads(json.dumps(rows[0]));conflict[3]['shared']['up']+=1
+        payload['rows']=[fresh,conflict]
+        with self.assertRaises(ValueError):export.restore(payload,cache)
+        self.assertEqual(cache.read_bytes(),before)
+    def test_default_router_history_is_in_tmp(self):
+        self.assertEqual(str(history.DB_FILE),'/tmp/vpn-usage/history.sqlite3')
+        self.assertEqual(history.RETENTION_DAYS,21)
+
     def test_http_loopback_host_origin_and_no_file_access(self):
         archive=Mock();archive.snapshot.return_value={'data':None}
         server=ThreadingHTTPServer(('127.0.0.1', 0), dash.handler_for(archive, 0))

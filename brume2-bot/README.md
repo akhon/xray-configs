@@ -1,6 +1,6 @@
 # Brume 2 VPN Telegram bot
 
-An OpenWrt bot for an existing Hysteria 2 server, with optional legacy Xray support. It provides local QR generation, certificate-verified client exports, persistent weekly traffic accounting, usage trends, a local dashboard, and private owner commands. This package contains source and synthetic configuration examples; it is not a router backup.
+An OpenWrt bot for an existing Hysteria 2 server, with optional legacy Xray support. It provides local QR generation, certificate-verified client exports, weekly traffic accounting with a Mac archive and RAM-only router cache, usage trends, a local dashboard, and private owner commands. This package contains source and synthetic configuration examples; it is not a router backup.
 
 ## Runtime and installation
 
@@ -19,7 +19,7 @@ Inspect the running installation first. Back up the affected scripts, configurat
 chmod 700 /usr/bin/xray_telegram_bot.py /usr/bin/xray_stats_report.py
 chmod 700 /usr/bin/hysteria_profiles.py /usr/bin/hysteria_user_stats.py
 chmod 700 /usr/bin/vpn_features.py /usr/bin/vpn_qr.py /usr/bin/vpn_usage_history.py
-chmod 700 /usr/bin/vpn_usage_trends.py /usr/bin/vpn_history_export.py
+chmod 700 /usr/bin/vpn_usage_trends.py /usr/bin/vpn_history_export.py /usr/bin/vpn_history_transfer.py
 chmod 700 /usr/bin/vpn_user_stats.py /usr/bin/xray_user_stats.py /usr/bin/*-user-stats
 chmod 600 /etc/xray/telegram_bot.json /etc/xray/telegram_stats_private.json
 chmod 600 /etc/hysteria2/config.json
@@ -75,7 +75,7 @@ CLI `hysteria-user-stats`, `vpn-user-stats`, and `xray-user-stats` remain admini
 
 ## Current-week and weekly history
 
-`vpn_usage_history.py` stores one-minute counter readings in `/etc/xray/vpn_usage_history.sqlite3`, mode 0600, retained for 120 days. It never clears the service counters. A first observation is a baseline, not usage. Process epochs and decreasing counters detect resets; only observed deltas and post-reset bytes are counted. The pre-reset tail is unknown and is explicitly marked incomplete. A reset entirely between two samples may be undetectable.
+`vpn_usage_history.py` stores one-minute readings only in `/tmp/vpn-usage/history.sqlite3`, mode 0600, retained for 21 days. On the target OpenWrt system `/tmp` is tmpfs (RAM); verify the mount before deployment. The Mac holds the durable archive. Routine collection and cache restoration do not write traffic history to router flash. Configuration and the small weekly delivery-deduplication state remain persistent. It never clears the service counters. A first observation is a baseline, not usage. Process epochs and decreasing counters detect resets; only observed deltas and post-reset bytes are counted. The pre-reset tail is unknown and is explicitly marked incomplete. A reset entirely between two samples may be undetectable.
 
 The reporting week is **Monday 14:00 UTC through the next Monday 14:00 UTC**, end exclusive. This preserves the existing report schedule; it is not a midnight-based calendar week. The private `/stats` command takes a fresh sample and reports from the current reporting-week start to the request time. It labels partial history, exact dates, sampling gaps, additions/removals and unavailable counters. A failed fresh read can still return the recorded history with an incomplete warning. Allocation across a boundary between samples is estimated and disclosed.
 
@@ -94,15 +94,15 @@ python3 /usr/bin/xray_stats_report.py --dry-run --private
 python3 /usr/bin/xray_stats_report.py --private
 ```
 
-Dry runs do not send, sample or write delivery state. `--private` restricts the run to the owner's completed-week report; `--force` bypasses successful-delivery deduplication. Cron stays at Monday 14:00 UTC. Keep the database across upgrades and restarts. Missing historical traffic cannot be reconstructed from a cumulative counter.
+Dry runs do not send, sample or write delivery state. `--private` restricts the run to the owner's completed-week report; `--force` bypasses successful-delivery deduplication. Cron stays at Monday 14:00 UTC. Keep the Mac archive across upgrades. The router cache survives bot/VPN restarts but is lost when the router reboots; recovery from the Mac is described below. Missing historical traffic cannot be reconstructed from a cumulative counter.
 
 ## Trends and the local Mac dashboard
 
 Both automatic weekly reports and interactive statistics append a comparison with the **same elapsed interval one week earlier**. Completed weekly reports compare two complete reporting weeks. The owner and group scopes remain separate. Percentages are withheld when either interval has incomplete history, resets, missing samples or missing users; a zero prior interval is reported explicitly instead of dividing by zero. The daily view covers seven UTC dates, ending at the report cutoff. A partial latest day is labeled; absent history remains unknown, never zero. The group command retains the original since-restart counters above the separate weekly trend section.
 
-The router continues to keep its bounded 120-day database in internal storage. No USB drive is required. The optional Mac dashboard copies only counter readings, labels, process epochs and scope metadata over existing SSH. It does not copy bot configuration, authentication credentials, certificates or private keys. Exporting is read-only and does not add router flash writes; the existing minute sampler is unchanged.
+The router keeps a bounded 21-day cache in RAM, enough for the current and previous reporting weeks. No USB drive is required and there are no periodic traffic-history writes to internal flash. The optional Mac dashboard copies only counter readings, labels, process epochs and scope metadata over existing SSH. It does not copy bot configuration, authentication credentials, certificates or private keys. Pulling readings is read-only. The Mac also restores recent archived readings to RAM after a router reboot. Both operations use existing SSH; the minute sampling schedule is unchanged.
 
-Install `src/vpn_history_export.py` alongside the other router modules, then run on the Mac with an existing SSH alias:
+Install `src/vpn_history_export.py` and `src/vpn_history_transfer.py` alongside the other router modules, then run on the Mac with an existing SSH alias:
 
 ```sh
 python3 dashboard/server.py --ssh-host router-alias --data-dir "$HOME/Library/Application Support/BrumeTraffic"
@@ -110,9 +110,15 @@ python3 dashboard/server.py --ssh-host router-alias --data-dir "$HOME/Library/Ap
 
 Open `http://127.0.0.1:8765`. The server binds only to loopback, rejects unexpected Host/Origin headers, serves an explicit route allowlist and uses no third-party web assets. SSH uses BatchMode and the Mac's existing configuration/agent; ensure host-key trust is already set up interactively. There is no browser terminal or command execution endpoint. Never change the binding to a public interface without adding authentication.
 
-The process synchronizes approximately every minute. Its SQLite archive (0600 inside a 0700 directory) deduplicates incremental readings and retains them without pruning. Initial catch-up is paginated; interrupted transfers can be retried. Scope metadata is refreshed from the router on each successful sync. Old readings remain available while SSH is unavailable, with a stale-data warning and exact last observation time. Every graph and total uses the same accounting rules as Telegram. The shared view excludes private accounts by raw ID; the private view includes only the configured accounts.
+The process synchronizes approximately every minute. Its SQLite archive (0600 inside a 0700 directory) deduplicates incremental readings and retains them without pruning. Initial catch-up is paginated; interrupted transfers can be retried. Scope metadata is refreshed from the router on each successful sync. A changed router boot ID triggers restoration of up to 21 days from the Mac to RAM. Restoration is paginated, idempotent, validates counter-only fields, refuses conflicting readings, checks the boot ID before committing and leaves newer samples intact. A failed restoration is retried and shown separately from successful Mac archival. Old readings remain available while SSH is unavailable, with a stale-data warning and exact last observation time. Every graph and total uses the same accounting rules as Telegram. The shared view excludes private accounts by raw ID; the private view includes only the configured accounts.
 
-Keep the process running to collect on the Mac. After laptop sleep or shutdown, it catches up from the router's remaining history; an absence longer than the router's retention window can leave gaps. No startup service is installed by this command. Closing the process stops local HTTP and synchronization, but the router's collection, private commands and weekly reports continue independently. Protect the Mac archive as private traffic metadata. The dashboard does not transmit it to any cloud service.
+Keep the process running to collect on the Mac. After laptop sleep or shutdown, it catches up from the RAM cache. A router reboot before synchronization can permanently lose unarchived readings; an absence beyond 21 days can also leave gaps. The bot can still answer and send weekly reports from RAM while the Mac is offline, but an empty or partial cache is explicitly marked incomplete. No startup service is installed by this command; configure a local login service if unattended Mac archival is needed. Closing the process stops local HTTP and synchronization, but the router's collection, private commands and weekly reports continue independently. Protect the Mac archive as private traffic metadata. The dashboard does not transmit it to any cloud service.
+
+### Migrating an existing flash database
+
+Before switching paths, inspect the deployed scripts and mount table. Keep an installation backup, snapshot the active SQLite database using its backup API, transfer that history snapshot to the Mac over SSH and verify row counts/content hashes there. Seed the new RAM database from the snapshot, deploy all dependent modules together and run the bot self-test and scoped report checks without restarting the VPN. Preserve the original cron schedule and delivery state. Capture any final samples written to the old database before retiring it.
+
+Only remove the old active flash database after the Mac archive and RAM cache have been checked against it. If validation fails, restore the original scripts and database path, preserving the transferred archive. Keep installation backups separate from active history; never copy SSH/TLS private keys into the archive. Restoring RAM does not make lost pre-reset traffic recoverable, and a weekly report already marked delivered is not silently re-sent when more history becomes available.
 
 ## Optional legacy Xray support
 

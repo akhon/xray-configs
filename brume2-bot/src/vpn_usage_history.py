@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable one-minute traffic samples and UTC Monday-14:00 reporting intervals.
+"""RAM-only minute samples and UTC Monday-14:00 reporting intervals.
 
 Counters are never cleared. First observations are baselines, not weekly usage.
 Restarts and decreasing counters add only post-reset counters and flag lost tails.
@@ -14,8 +14,8 @@ import sqlite3
 import sys
 import time
 
-DB_FILE = Path('/etc/xray/vpn_usage_history.sqlite3')
-RETENTION_DAYS = 120
+DB_FILE = Path('/tmp/vpn-usage/history.sqlite3')
+RETENTION_DAYS = 21
 MAX_GAP = 150
 UTC = dt.timezone.utc
 
@@ -106,7 +106,7 @@ def connect(path=DB_FILE, readonly=False):
     else:
         if path.is_symlink():
             raise HistoryError('History path must not be a symlink')
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(str(path), os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         os.fchmod(fd, 0o600)
         os.close(fd)

@@ -27,7 +27,7 @@ from urllib.parse import quote, urlencode
 import requests
 
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 XRAY_CONFIG = Path("/etc/xray/config.json")
 BOT_CONFIG = Path("/etc/xray/telegram_bot.json")
