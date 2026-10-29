@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VPN · История трафика</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body><main>
+<header><div><p class="eyebrow">BRUME · ЛОКАЛЬНЫЙ АРХИВ</p><h1>История VPN-трафика</h1><p class="muted">Недельная динамика VPN по сохранённым показаниям.</p></div><div class="connection"><span id="light" class="light"></span><span id="sync">Загрузка архива…</span></div></header>
+<div class="toolbar"><nav aria-label="Группа пользователей"><button id="shared" aria-pressed="true">Общие пользователи</button><button id="private" aria-pressed="false">Личные пользователи</button></nav><label class="protocol">Протокол <select id="protocol"></select></label></div>
+<div id="empty" class="notice" role="status">Подключаемся к роутеру. Если соединение недоступно, сохранённая история останется доступна.</div>
+<div id="content" hidden>
+<div class="period"><h2>Текущая отчётная неделя</h2><p id="period"></p><p class="muted">Неделя начинается в понедельник в 14:00 UTC. Правая граница периода не включается.</p></div>
+<div id="warning" class="notice" role="status"></div>
+<section class="cards" aria-label="Итоги недели"><article><p>Учтённый трафик</p><strong id="total">—</strong><small id="total-note"></small></article><article><p>Загрузка / отдача</p><strong id="directions">—</strong><small>На устройства / с устройств</small></article><article><p>К предыдущей неделе</p><strong id="change">—</strong><small id="comparison"></small></article></section>
+<section class="panel"><div class="section-head"><div><h2>Последние 7 дней</h2><p class="muted">По календарным дням UTC. Последний день может быть неполным.</p></div><div class="legend"><span class="down">Загрузка</span><span class="up">Отдача</span></div></div><div id="chart" role="img" aria-label="Трафик по дням"></div><p class="chart-note">Пунктир — неполная история. «Нет данных» не означает нулевой трафик. Наведите на столбец для подробностей.</p></section>
+<section class="panel"><div class="section-head"><div><h2>По пользователям</h2><p id="previous-period" class="muted"></p></div></div><div class="table-wrap"><table><thead><tr><th>Пользователь</th><th>Эта неделя</th><th>Ранее</th><th>Изменение</th></tr></thead><tbody id="users"></tbody></table></div></section>
+<footer><p id="archive"></p><p>Данные обновляются примерно раз в минуту по SSH. Архив хранится на Mac; на роутере — временная копия в RAM. Страница доступна только на этом Mac. Пароли, ключи и токен бота сюда не экспортируются.</p><p>Сбросы и пропуски отмечаются как неполная история; проценты по ней не рассчитываются. Разделение интервалов на границе суток и недели может быть оценочным.</p></footer>
+</div></main></body></html>

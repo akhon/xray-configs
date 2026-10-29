@@ -1,0 +1,3 @@
+# Requires router cron timezone UTC. Merge into the existing crontab; do not replace it.
+* * * * * /usr/bin/python3 /usr/bin/vpn_usage_history.py 2>&1 | logger -t vpn-usage-history
+0 14 * * 1 /usr/bin/python3 /usr/bin/xray_stats_report.py 2>&1 | logger -t xray-user-stats
