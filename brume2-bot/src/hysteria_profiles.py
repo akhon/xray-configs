@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode
 
 HYSTERIA_CONFIG = Path("/etc/hysteria2/config.json")
 DEFAULT_LABELS = Path("/etc/hysteria2/user-labels.json")
+DEFAULT_CLIENT_META = Path("/etc/hysteria2/client-meta.json")
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_LABEL_BYTES = 64 * 1024
 MAX_CERT_BYTES = 128 * 1024
@@ -160,14 +161,27 @@ def _certificate_pin(path, endpoint):
             raise ValueError("validity")
         return hashlib.sha256(leaf).hexdigest()
     except (OSError, ValueError, TypeError, UnicodeError, KeyError, ssl.SSLError) as exc:
-        raise ProfileError("Hysteria certificate is unavailable, expired, or does not match the public IP") from exc
+        raise ProfileError("Hysteria certificate is unavailable, expired, or does not match the TLS server name") from exc
+
+
+def _tls_server_name(endpoint):
+    # A dynamic connection address need not be the certificate identity. Keep
+    # the existing certificate/pin by explicitly configuring its IP SAN.
+    try:
+        metadata = load_config(DEFAULT_CLIENT_META, MAX_LABEL_BYTES) if DEFAULT_CLIENT_META.exists() else {}
+        name = metadata.get("tls_server_name", str(endpoint))
+        if not isinstance(name, str):
+            raise ValueError("TLS name must be an IP string")
+        return ipaddress.ip_address(name)
+    except (OSError, ValueError, TypeError) as exc:
+        raise ProfileError("Hysteria TLS server name is invalid") from exc
 
 
 def build_document(address, user_filter=None, config_path=None, labels_path=None, excluded_users=()):
     """Return a JSON array for all users, or one exact case-sensitive label.
 
-    The caller obtains the current public IP independently. An IP change that
-    does not match the certificate SAN fails safely; insecure TLS is never used.
+    The caller obtains the current public IP independently. The configured TLS
+    identity (or endpoint by default) must match the certificate IP SAN.
     """
     try:
         endpoint = ipaddress.ip_address(address)
@@ -185,7 +199,8 @@ def build_document(address, user_filter=None, config_path=None, labels_path=None
     if not selected:
         raise ProfileError("Hysteria user label was not found")
     selected.sort(key=lambda account: labels[account])
-    pin = _certificate_pin(certificate_path, endpoint)
+    server_name = _tls_server_name(endpoint)
+    pin = _certificate_pin(certificate_path, server_name)
     profiles = []
     for account in selected:
         label = labels[account]
@@ -202,7 +217,7 @@ def build_document(address, user_filter=None, config_path=None, labels_path=None
                 "settings": {"version": 2, "address": str(endpoint), "port": port},
                 "streamSettings": {
                     "network": "hysteria", "security": "tls",
-                    "tlsSettings": {"serverName": str(endpoint), "alpn": ["h3"], "pinnedPeerCertSha256": pin},
+                    "tlsSettings": {"serverName": str(server_name), "alpn": ["h3"], "pinnedPeerCertSha256": pin},
                     "hysteriaSettings": {"version": 2, "auth": account + ":" + users[account]},
                 },
             }],
@@ -243,7 +258,8 @@ def build_links_document(address, user_filter=None, config_path=None, labels_pat
                     or tls["alpn"] != ["h3"]):
                 raise ValueError("unsupported profile")
             endpoint = ipaddress.ip_address(destination["address"])
-            if tls["serverName"] != str(endpoint):
+            server_name = ipaddress.ip_address(tls["serverName"])
+            if tls["serverName"] != str(server_name):
                 raise ValueError("server name")
             port = destination["port"]
             if type(port) is not int or not 1 <= port <= 65535:
@@ -261,7 +277,7 @@ def build_links_document(address, user_filter=None, config_path=None, labels_pat
                     or any(ord(character) < 32 or ord(character) == 127 for character in label)):
                 raise ValueError("label")
             authority = "[%s]" % endpoint if endpoint.version == 6 else str(endpoint)
-            query = urlencode({"sni": str(endpoint), "pinSHA256": pin, "pcs": pin}, quote_via=quote)
+            query = urlencode({"sni": str(server_name), "pinSHA256": pin, "pcs": pin}, quote_via=quote)
             links.append("hysteria2://%s:%s@%s:%s/?%s#%s" % (
                 quote(account, safe=""), quote(password, safe=""), authority, port,
                 query, quote(label, safe=""),
@@ -269,36 +285,3 @@ def build_links_document(address, user_filter=None, config_path=None, labels_pat
         return "\n".join(links) + "\n"
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         raise ProfileError("Hysteria profile cannot be safely exported as a link") from exc
-
-
-def build_hiddify_document(address, user_filter=None, config_path=None, labels_path=None, excluded_users=()):
-    """Self-contained sing-box/Hiddify profile, with the verified public certificate.
-
-    Hiddify's Hysteria URI importer drops pinSHA256/pcs. Inline CA trust avoids
-    requiring an extra certificate file and keeps TLS verification enabled.
-    """
-    profiles = json.loads(build_document(address, user_filter, config_path, labels_path, excluded_users))
-    config = load_config(config_path)
-    _port, certificate_path, _users = _server_parameters(config)
-    try:
-        match = CERT_RE.match(_read_bounded(certificate_path, MAX_CERT_BYTES).decode("ascii"))
-        if not match:
-            raise ValueError("certificate")
-        certificate = match.group(1).strip() + "\n"
-        pin = hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate)).hexdigest()
-        outbounds = []
-        for profile in profiles:
-            outbound, = profile["outbounds"]
-            stream = outbound["streamSettings"]
-            tls = stream["tlsSettings"]
-            if pin != tls["pinnedPeerCertSha256"]:
-                raise ValueError("certificate changed during export")
-            outbounds.append({
-                "type": "hysteria2", "tag": profile["remarks"] + " - Hiddify",
-                "server": outbound["settings"]["address"], "server_port": outbound["settings"]["port"],
-                "password": stream["hysteriaSettings"]["auth"],
-                "tls": {"enabled": True, "server_name": tls["serverName"], "certificate": [certificate]},
-            })
-        return json.dumps({"outbounds": outbounds}, separators=(",", ":"), allow_nan=False)
-    except (ValueError, KeyError, TypeError, UnicodeError) as exc:
-        raise ProfileError("Hiddify profile cannot be safely exported") from exc

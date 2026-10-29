@@ -49,7 +49,7 @@ Use numerical IDs for authorization. A Telegram username can change and is not a
 
 `examples/hysteria2-server.example.json` shows the deployed server structure with replacement passwords. Install it only after filling the parameters and reviewing your existing server. The traffic API must remain `127.0.0.1:18081` with a nonempty secret; never forward that port. The ACL blocks private, loopback, multicast and reserved destinations. Replace the documentation address `203.0.113.10/32` with the server's actual public address to block proxying back to the server itself; review your own additional reserved/management ranges.
 
-The profile exporter currently targets an IP endpoint. The installed public certificate must be valid and have that IP in its SAN. Export fails if the current public IP no longer matches. Keep the TLS private key on the server. Optional display aliases live in `/etc/hysteria2/user-labels.json`, using `examples/hysteria2-user-labels.example.json` as a template. Private-account filtering always uses raw account IDs, so changing an alias cannot expose credentials.
+The profile exporter currently targets an IP endpoint. By default, the installed public certificate must be valid and have that IP in its SAN. If the public IP changes, set `tls_server_name` in `/etc/hysteria2/client-meta.json` to the existing certificate's IP SAN (see `examples/hysteria2-client-meta.example.json`). Exports then use the current public IP for the connection and the configured IP for TLS verification, preserving the certificate and pin. Invalid or mismatched TLS identities still fail closed. The stored `endpoint`, if present, is informational; bot exports discover the public address independently. Keep the TLS private key on the server. Optional display aliases live in `/etc/hysteria2/user-labels.json`, using `examples/hysteria2-user-labels.example.json` as a template. Private-account filtering always uses raw account IDs, so changing an alias cannot expose credentials.
 
 Adding accounts remains an administrator operation outside Telegram. Preserve existing accounts, validate a staged server configuration, back up, and sample counters immediately before and after any required restart. The bot has no account-creation command.
 
@@ -64,12 +64,11 @@ Adding accounts remains an administrator operation outside Telegram. Preserve ex
 | `/hysteria [label]` | Pinned Xray-format Hysteria client JSON | Same |
 | `/hylinks [label]` | Hysteria share links | Same |
 | `/qr label` | Existing shared account's URI QR | Same |
-| `/qr label hiddify` | Existing shared account's self-contained Hiddify QR | Same |
 | `/start`, `/help` | Help with private statistics semantics | Shared command help |
 
 The credential-export commands exclude `private_hysteria_users` even in the owner's chat and in bulk exports. Private users' profiles must be delivered separately through an authorized private channel outside Telegram.
 
-The Hiddify format embeds the trusted **public** certificate and keeps TLS verification on. Its QR includes a `// profile-title:` metadata line to name the imported profile. Hiddify core 4.0.0 was checked with an exported QR: an HTTPS request succeeded and a substituted unrelated certificate was rejected. The regular Hysteria URI's `pinSHA256`/`pcs` parameters are not preserved by that Hiddify importer; use the `hiddify` form instead of disabling certificate verification. No universal claim is made for all phone apps or versions.
+QRs contain standard `hysteria2://` links with a profile name and the `pinSHA256`/`pcs` certificate-pin parameters. The client must preserve the pin. Native Hysteria additionally needs the trusted server CA certificate; keep TLS verification enabled. Pinned Xray-format JSON remains available via `/hysteria`. Import behavior depends on the client and version.
 
 CLI `hysteria-user-stats`, `vpn-user-stats`, and `xray-user-stats` remain administrator tools and show since-restart counters. Hysteria connections count authenticated client connections, not unique people or proxy streams. Xray recent activity is approximately a 20-second indicator, not a session count.
 

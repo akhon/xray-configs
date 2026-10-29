@@ -27,7 +27,7 @@ from urllib.parse import quote, urlencode
 import requests
 
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 XRAY_CONFIG = Path("/etc/xray/config.json")
 BOT_CONFIG = Path("/etc/xray/telegram_bot.json")
@@ -1548,7 +1548,7 @@ VMESS_HELP_TEXT = """Brume 2 VPN commands
 /links [user] — export VMess/REALITY share links as a text file
 /hysteria [user] — export pinned Hysteria 2 client profiles as JSON
 /hylinks [user] — export Hysteria 2 import links; phone import is unverified
-/qr user [hiddify] — get an existing user QR; add hiddify for Hiddify/iOS
+/qr user — get an existing user Hysteria 2 QR
 /stats [user] — show Xray and Hysteria 2 per-user traffic and online status
 /rotate — begin safe VMess/VLESS UUID rotation
 /restart — validate and restart Xray
@@ -1579,7 +1579,7 @@ HELP_TEXT = """Brume 2 VPN commands
 /ip — show the router's current public IP
 /hysteria [user] — export pinned Hysteria 2 client profiles as JSON
 /hylinks [user] — export Hysteria 2 import links; phone import is unverified
-/qr user [hiddify] — get an existing user QR; add hiddify for Hiddify/iOS
+/qr user — get an existing user Hysteria 2 QR
 /stats [user] — show Hysteria 2 counters, connections and weekly trends
 /status — show Hysteria 2 service and statistics API health
 /help — show this help"""
@@ -1756,31 +1756,21 @@ class Bot:
         )
 
     def command_qr(self, chat_id, reply_to, arguments):
-        if (len(arguments) not in (1, 2) or not PROFILE_LABEL_RE.fullmatch(arguments[0])
-                or UUID_RE.search(arguments[0]) or (len(arguments) == 2 and arguments[1] != "hiddify")):
-            raise UserError("Usage: /qr <existing user label> [hiddify]")
+        if (len(arguments) != 1 or not PROFILE_LABEL_RE.fullmatch(arguments[0])
+                or UUID_RE.search(arguments[0])):
+            raise UserError("Usage: /qr <existing user label>")
         import hysteria_profiles
         from vpn_qr import qr_png
-        is_hiddify = len(arguments) == 2
         try:
-            if is_hiddify:
-                payload = hysteria_profiles.build_hiddify_document(
-                    get_public_ip(), arguments[0], excluded_users=self.settings.private_hysteria_users)
-                content = qr_png(payload, payload_format="hiddify",
-                                 profile_title=arguments[0] + " - Hysteria 2")
-            else:
-                links = hysteria_profiles.build_links_document(
-                    get_public_ip(), arguments[0], excluded_users=self.settings.private_hysteria_users)
-                link, = links.strip().splitlines()
-                content = qr_png(link)
+            links = hysteria_profiles.build_links_document(
+                get_public_ip(), arguments[0], excluded_users=self.settings.private_hysteria_users)
+            link, = links.strip().splitlines()
+            content = qr_png(link)
         except (hysteria_profiles.ProfileError, ValueError):
             raise UserError("QR unavailable: unknown user or Telegram export is disabled for this user") from None
         caption = (
-            "Private Hysteria 2 profile for Hiddify. The trusted router certificate is included; "
-            "TLS verification stays enabled. Generated locally on this router."
-            if is_hiddify else
             "Private Hysteria 2 import link. Generated locally on this router. "
-            "Hiddify users: request /qr <user> hiddify instead. Other importers must preserve the certificate pin. "
+            "Importers must preserve the certificate pin. "
             "Native Hysteria also needs the server CA certificate; keep TLS verification enabled.")
         self.telegram.send_photo(chat_id, "hysteria2-qr.png", content, caption, reply_to)
 

@@ -121,7 +121,7 @@ class BotTests(unittest.TestCase):
         self.config.write_text(json.dumps({'listen':'0.0.0.0:443','tls':{'cert':str(self.certfile),'key':'/test.key'},
            'auth':{'type':'userpass','userpass':{'alice':'Secret-A-123','PrIvAtE-A':'Secret-G-456'}}}))
         self.labels.write_text(json.dumps({'PrIvAtE-A':'private-alias'}))
-        self.patchers=[patch.object(hist,'sample_once',return_value=True),patch.object(hp,'HYSTERIA_CONFIG',self.config),patch.object(hp,'DEFAULT_LABELS',self.labels),
+        self.patchers=[patch.object(hist,'sample_once',return_value=True),patch.object(hp,'HYSTERIA_CONFIG',self.config),patch.object(hp,'DEFAULT_LABELS',self.labels),patch.object(hp,'DEFAULT_CLIENT_META',Path(self.tmp.name)/'client-meta.json'),
             patch.object(hp,'_certificate_pin',return_value=hashlib.sha256(ssl.PEM_cert_to_DER_cert(self.cert)).hexdigest()),patch.object(bot,'get_public_ip',return_value='203.0.113.10')]
         for p in self.patchers: p.start()
         self.b=bot.Bot(bot.Settings('123456:fake',frozenset({-1}),frozenset({2}),False,
@@ -190,45 +190,18 @@ class BotTests(unittest.TestCase):
         self.assertIn('/qr user',self.b.telegram.send_message.call_args.args[1])
         self.b.handle_message(self.message('/restart'))
         self.assertIn('disabled',self.b.telegram.send_message.call_args.args[1])
-    def test_hiddify_qr_contains_trusted_certificate(self):
+    def test_removed_format_is_rejected_without_export(self):
         self.b.handle_message(self.message('/qr alice hiddify'))
-        self.b.telegram.send_photo.assert_called_once()
-        data=self.b.telegram.send_photo.call_args.args[2]
-        self.assertTrue(data.startswith(b'\x89PNG'))
-        document=json.loads(hp.build_hiddify_document('203.0.113.10','alice'))
-        tls=document['outbounds'][0]['tls']
-        self.assertEqual(tls['certificate'],[self.cert])
-        self.assertFalse(tls.get('insecure',False))
-
-    @unittest.skipUnless(importlib.util.find_spec('zxingcpp'), 'Decoder verified on Mac')
-    def test_hiddify_qr_decodes_exact_json(self):
-        import zxingcpp
-        from PIL import Image
-        document=hp.build_hiddify_document('203.0.113.10','alice')
-        decoded=zxingcpp.read_barcode(Image.open(io.BytesIO(qr_png(document,'hiddify'))))
-        self.assertEqual(decoded.text,document)
-
-    def test_hiddify_private_user_and_unauthorized_blocked(self):
-        for text in ['/qr private-alias hiddify','/qr private-a hiddify','/qr missing hiddify']:
-            self.b.telegram.reset_mock();self.b.handle_message(self.message(text))
-            self.b.telegram.send_photo.assert_not_called()
-            self.assertNotIn('Secret-G-456',str(self.b.telegram.mock_calls))
+        self.b.telegram.send_photo.assert_not_called()
+        self.b.telegram.send_document.assert_not_called()
+        self.assertIn('Usage: /qr <existing user label>', self.b.telegram.send_message.call_args.args[1])
         self.b.telegram.reset_mock()
-        self.b.handle_message(self.message('/qr alice hiddify',user=3))
-        self.assertEqual(self.b.telegram.mock_calls,[])
+        self.b.handle_message(self.message('/help'))
+        self.assertNotIn('hiddify', self.b.telegram.send_message.call_args.args[1].lower())
 
-    def test_hiddify_certificate_race_rejected(self):
-        with patch.object(hp,'_certificate_pin',return_value='0'*64):
-            with self.assertRaises(hp.ProfileError):
-                hp.build_hiddify_document('203.0.113.10','alice')
-
-    def test_hiddify_qr_rejects_insecure_and_multiple_users(self):
-        document=json.loads(hp.build_hiddify_document('203.0.113.10','alice'))
-        document['outbounds'][0]['tls']['insecure']=True
-        with self.assertRaises(ValueError):qr_png(json.dumps(document),'hiddify')
-        del document['outbounds'][0]['tls']['insecure']
-        document['outbounds'].append(document['outbounds'][0])
-        with self.assertRaises(ValueError):qr_png(json.dumps(document),'hiddify')
+    def test_qr_rejects_non_uri_payloads(self):
+        for value in ['{}', 'https://example.com', 'hysteria2://x\nsecret', None]:
+            with self.assertRaises(ValueError): qr_png(value)
 
     def test_photo_request_multipart(self):
         client=bot.TelegramClient('fake'); client.request=Mock()

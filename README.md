@@ -24,7 +24,7 @@ The [bot package](brume2-bot/README.md) manages an existing OpenWrt Hysteria 2 i
 
 - One configured owner can use private `/stats` for the current reporting week and the common commands.
 - Authorized groups retain shared-user statistics; private accounts are excluded from their traffic reports and all Telegram credential exports.
-- `/qr label hiddify` generates a QR locally with the trusted public certificate and an importable profile name.
+- `/qr label` generates a standard Hysteria 2 URI QR locally, with a profile name and certificate pin.
 - One-minute history with a durable Mac archive and a RAM-only router cache produces actual weekly usage, with reset/gap warnings and exact reporting dates. The reporting week starts Monday 14:00 UTC.
 - Like-for-like weekly comparisons and daily charts keep incomplete history visible; an optional loopback dashboard archives counters on the Mac over SSH and restores the router’s temporary history after reboot.
 - Group/sender allowlists and a separate private owner ID enforce access. Telegram cannot create VPN users.

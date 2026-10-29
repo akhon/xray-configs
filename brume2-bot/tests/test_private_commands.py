@@ -30,7 +30,7 @@ class PrivateCommands(unittest.TestCase):
         bot_sender=message();bot_sender['from']['is_bot']=True;invalid.append(bot_sender)
         missing_sender=message();del missing_sender['from'];invalid.append(missing_sender)
         for payload in invalid:
-            for command in ['/start','/help','/stats','/ip','/status','/qr alice hiddify','/hysteria','/hylinks','/restart']:
+            for command in ['/start','/help','/stats','/ip','/status','/qr alice','/hysteria','/hylinks','/restart']:
                 self.b.telegram.reset_mock();payload['text']=command
                 self.b.handle_message(payload)
                 self.assertEqual(self.b.telegram.mock_calls,[],(payload,command))
@@ -65,7 +65,7 @@ class PrivateCommands(unittest.TestCase):
             for command,expected in [('/start','/qr'),('/help','Monday 14:00 UTC'),('/ip','203.0.113.1'),('/status','running')]:
                 self.b.telegram.reset_mock();self.b.handle_message(message(command))
                 self.assertIn(expected,self.b.telegram.send_message.call_args.args[1])
-        for command,method,args in [('/hysteria alice','send_hysteria_profile',(OWNER,'alice')),('/hylinks alice','send_hysteria_links',(OWNER,'alice')),('/qr alice hiddify','command_qr',(OWNER,None,['alice','hiddify']))]:
+        for command,method,args in [('/hysteria alice','send_hysteria_profile',(OWNER,'alice')),('/hylinks alice','send_hysteria_links',(OWNER,'alice')),('/qr alice','command_qr',(OWNER,None,['alice']))]:
             with patch.object(self.b,method) as call:
                 self.b.handle_message(message(command));call.assert_called_once_with(*args)
     def test_group_stats_remains_shared_and_excludes_private_users(self):
