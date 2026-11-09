@@ -105,8 +105,11 @@ def _user_labels(users, labels_path=None, extra_secrets=()):
 def _server_parameters(config):
     # These are the deployed, tested server options. New transport options need
     # explicit exporter support before they can be enabled safely.
-    if set(config) - {"listen", "tls", "auth", "acl", "trafficStats"}:
+    if set(config) - {"listen", "tls", "auth", "acl", "trafficStats", "maxSessionsPerUser"}:
         raise ProfileError("Hysteria export does not support the configured server options")
+    limit = config.get("maxSessionsPerUser", 0)
+    if type(limit) is not int or not 0 <= limit <= 2147483647:
+        raise ProfileError("Hysteria session limit is invalid")
     tls = config.get("tls")
     if not isinstance(tls, dict) or set(tls) != {"cert", "key"}:
         raise ProfileError("Hysteria export requires the supported certificate TLS setup")

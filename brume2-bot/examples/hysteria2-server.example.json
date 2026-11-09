@@ -1,4 +1,5 @@
 {
+  "maxSessionsPerUser": 2,
   "listen": "0.0.0.0:443",
   "tls": {
     "cert": "/etc/hysteria2/server.crt",
