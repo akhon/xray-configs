@@ -47,6 +47,8 @@ Use numerical IDs for authorization. A Telegram username can change and is not a
 
 ## Hysteria server configuration
 
+For destination hostnames sent through the tunnel, the server uses the router's [ordered DNS-over-TLS upstreams](examples/router-dns.md). The standard QR does not override an app's own DNS settings.
+
 The example enables a limit of **two simultaneous authenticated sessions per account**, including future accounts. It requires the [custom Hysteria build and startup guard](hysteria-session-limit/README.md); stock Hysteria does not implement `maxSessionsPerUser`. Install the patched binary and guard together before enabling the example. Clients and credentials are unchanged. This counts sessions rather than unique physical devices; every compatible client app is subject to the server limit.
 
 `examples/hysteria2-server.example.json` shows the deployed server structure with replacement passwords. Install it only after filling the parameters and reviewing your existing server. The traffic API must remain `127.0.0.1:18081` with a nonempty secret; never forward that port. The ACL blocks private, loopback, multicast and reserved destinations. Replace the documentation address `203.0.113.10/32` with the server's actual public address to block proxying back to the server itself; review your own additional reserved/management ranges.
