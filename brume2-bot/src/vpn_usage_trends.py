@@ -47,7 +47,7 @@ def compare(current, previous, complete):
 
 
 def build_trends(start, end, path=history.DB_FILE, enabled=False, included_users=None,
-                 excluded_users=(), label_filter=None):
+                 excluded_users=(), label_filter=None, include_days=True):
     if start.tzinfo is None or end.tzinfo is None or end < start:
         raise history.HistoryError('Invalid trend interval')
     start, end = start.astimezone(history.UTC), end.astimezone(history.UTC)
@@ -75,7 +75,7 @@ def build_trends(start, end, path=history.DB_FILE, enabled=False, included_users
                          'up': c['up'] if c else None, 'down': c['down'] if c else None,
                          **compare(cbytes, pbytes, current['complete'] and previous['complete'])})
         days = []
-        for offset in range(7):
+        for offset in range(7 if include_days else 0):
             left = day_start + dt.timedelta(days=offset)
             right = min(left + dt.timedelta(days=1), end)
             summary = _summary(samples, left, right)

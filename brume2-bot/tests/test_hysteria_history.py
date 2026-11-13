@@ -108,8 +108,8 @@ class HistoryTests(unittest.TestCase):
     def test_report_dates_and_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             text=hist.render_report(dt.datetime(2026,10,26,14,tzinfo=hist.UTC),Path(tmp)/'absent',False)
-            self.assertIn('2026-10-19 14:00:00 UTC -> 2026-10-26 14:00:00 UTC',text)
-            self.assertIn('INCOMPLETE HISTORY',text); self.assertIn('Usage unavailable',text)
+            self.assertIn('2026-10-19 14:00:00 → 2026-10-26 14:00:00 UTC',text)
+            self.assertIn('неполные данные',text); self.assertIn('нет данных',text)
 
 
 class BotTests(unittest.TestCase):

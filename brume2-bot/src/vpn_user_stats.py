@@ -91,6 +91,21 @@ def render_summary(user_filter=None, compact=True, xray_collector=None, hysteria
     return result
 
 
+def render_group_week(now, user_filter, enabled, excluded_users, fresh):
+    import vpn_usage_history as history
+    activity = {}
+    for name, collector, scope in [('Hysteria 2', hysteria.collect_stats, {'excluded_users': excluded_users})] + (
+            [('Xray', xray.collect_stats, {})] if enabled else []):
+        try:
+            activity[name] = {r.label: r.online if r.online != 'n/a' else '—'
+                              for r in collector(user_filter=user_filter, **scope)}
+        except StatsError:
+            # The history can still supply the report if live activity is unavailable.
+            activity[name] = {}
+    return history.render_current_week(now, included_users=None, excluded_users=excluded_users, enabled=enabled,
+                                       label_filter=user_filter, fresh=fresh, online=activity)
+
+
 class _ArgumentParser(argparse.ArgumentParser):
     def error(self, _message):
         self.exit(2, "Error: Use vpn-user-stats [user-label or person].\n")

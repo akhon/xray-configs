@@ -91,8 +91,9 @@ class TrendTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for text in [history.render_report(self.end, Path(tmp)/'missing', False),
                          history.render_current_week(self.end, Path(tmp)/'missing', ['private-a'])]:
-                self.assertIn('Тренд:', text)
-                self.assertIn('INCOMPLETE HISTORY', text)
+                self.assertIn('Δ нед.', text)
+                self.assertNotIn('По дням', text)
+                self.assertIn('неполные данные', text)
 
 
 class ArchiveTests(unittest.TestCase):

@@ -45,21 +45,21 @@ class PrivateCommands(unittest.TestCase):
         with patch.object(bot,'utc_now',return_value=now),patch.object(hist,'sample_once',return_value=True) as sample,patch.object(hist,'read_samples',return_value=source):
             self.b.handle_message(message())
             text=self.b.telegram.send_message.call_args.args[1]
-            self.assertIn('private-a | up 100 B',text);self.assertIn('private-b | up 300 B',text)
-            self.assertNotIn('alice',text);self.assertIn('2026-10-26 14:00:00 UTC -> 2026-10-26 14:01:00 UTC',text)
+            self.assertRegex(text, r'private-a\s+100 B\s+200 B\s+300 B');self.assertRegex(text, r'private-b\s+300 B\s+400 B\s+700 B')
+            self.assertNotIn('alice',text);self.assertIn('2026-10-26 14:00:00 → 2026-10-26 14:01:00 UTC',text)
             sample.assert_called_once()
             self.b.handle_message(message('/stats private-b'))
             text=self.b.telegram.send_message.call_args.args[1]
             self.assertIn('private-b',text);self.assertNotIn('private-a',text)
     def test_private_filter_cannot_select_general_users(self):
-        with patch.object(hist,'sample_once') as sample:
+        with patch.object(hist,'sample_once',return_value=True) as sample:
             self.b.handle_message(message('/stats alice'));sample.assert_not_called()
         self.assertIn('Only configured private users',self.b.telegram.send_message.call_args.args[1])
     def test_sample_failure_still_returns_incomplete_history(self):
-        with patch.object(hist,'sample_once',side_effect=RuntimeError('SECRET')),patch.object(hist,'render_current_week',return_value='observed usage'):
+        with patch.object(hist,'sample_once',side_effect=RuntimeError('SECRET')),patch.object(hist,'read_samples',return_value={}):
             self.b.handle_message(message())
         text=self.b.telegram.send_message.call_args.args[1]
-        self.assertIn('INCOMPLETE HISTORY',text);self.assertIn('observed usage',text);self.assertNotIn('SECRET',text)
+        self.assertIn('неполные данные',text);self.assertIn('нет данных',text);self.assertNotIn('SECRET',text)
     def test_common_commands_are_available_to_owner(self):
         with patch.object(bot,'get_public_ip',return_value='203.0.113.1'),patch.object(bot,'hysteria_health_snapshot',return_value={'service':'running','stats_available':True}):
             for command,expected in [('/start','/qr'),('/help','Monday 14:00 UTC'),('/ip','203.0.113.1'),('/status','running')]:
@@ -70,9 +70,9 @@ class PrivateCommands(unittest.TestCase):
                 self.b.handle_message(message(command));call.assert_called_once_with(*args)
     def test_group_stats_remains_shared_and_excludes_private_users(self):
         import vpn_user_stats
-        with patch.object(vpn_user_stats,'render_summary',return_value='shared stats') as render,patch.object(hist,'sample_once') as sample:
+        with patch.object(vpn_user_stats,'render_group_week',return_value='shared stats') as render,patch.object(hist,'sample_once',return_value=True) as sample:
             self.b.handle_message(message(chat=GROUP,kind='supergroup'))
-            render.assert_called_once_with(None,compact=True,vmess_enabled=False,excluded_hysteria_users=PRIVATE,trend_now=ANY)
+            render.assert_called_once_with(ANY,None,False,PRIVATE,True)
             sample.assert_called_once()
     def test_menus_are_scoped_and_describe_private_stats(self):
         self.assertEqual(self.b.menu_targets(),[(GROUP,False),(OWNER,True)])
@@ -84,11 +84,11 @@ class PrivateCommands(unittest.TestCase):
         now=dt.datetime(2026,10,26,14,tzinfo=hist.UTC)
         with patch.object(hist,'read_samples') as read:
             text=hist.render_current_week(now,included_users=PRIVATE);read.assert_not_called()
-        self.assertIn('No time has elapsed',text);self.assertNotIn('2026-10-19',text)
+        self.assertIn('нет данных',text);self.assertNotIn('2026-10-19',text)
     def test_monday_before_reporting_boundary_stays_in_previous_week(self):
         now=dt.datetime(2026,10,26,13,59,tzinfo=hist.UTC)
         with patch.object(hist,'read_samples',return_value={}):text=hist.render_current_week(now,included_users=PRIVATE)
-        self.assertIn('2026-10-19 14:00:00 UTC -> 2026-10-26 13:59:00 UTC',text)
+        self.assertIn('2026-10-19 14:00:00 → 2026-10-26 13:59:00 UTC',text)
 
 class SettingsTests(unittest.TestCase):
     def setUp(self):

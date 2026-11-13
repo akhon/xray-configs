@@ -61,7 +61,7 @@ Adding accounts remains an administrator operation outside Telegram. Preserve ex
 
 | Command | Owner's private chat | Existing authorized group |
 | --- | --- | --- |
-| `/stats` | Current reporting-week traffic and trends for the configured private accounts | Shared accounts' counters since service restart/API reset, plus weekly trends |
+| `/stats` | Current reporting-week traffic and trends for the configured private accounts | Current reporting-week traffic, trends and live connection counts for shared accounts |
 | `/stats account` | One of the configured private accounts | Existing shared-account filter |
 | `/ip` | Current public IP | Same |
 | `/status` | Hysteria service and local stats API health | Same |
@@ -80,7 +80,7 @@ CLI `hysteria-user-stats`, `vpn-user-stats`, and `xray-user-stats` remain admini
 
 `vpn_usage_history.py` stores one-minute readings only in `/tmp/vpn-usage/history.sqlite3`, mode 0600, retained for 21 days. On the target OpenWrt system `/tmp` is tmpfs (RAM); verify the mount before deployment. The Mac holds the durable archive. Routine collection and cache restoration do not write traffic history to router flash. Configuration and the small weekly delivery-deduplication state remain persistent. It never clears the service counters. A first observation is a baseline, not usage. Process epochs and decreasing counters detect resets; only observed deltas and post-reset bytes are counted. The pre-reset tail is unknown and is explicitly marked incomplete. A reset entirely between two samples may be undetectable.
 
-The reporting week is **Monday 14:00 UTC through the next Monday 14:00 UTC**, end exclusive. This preserves the existing report schedule; it is not a midnight-based calendar week. The private `/stats` command takes a fresh sample and reports from the current reporting-week start to the request time. It labels partial history, exact dates, sampling gaps, additions/removals and unavailable counters. A failed fresh read can still return the recorded history with an incomplete warning. Allocation across a boundary between samples is estimated and disclosed.
+The reporting week is **Monday 14:00 UTC through the next Monday 14:00 UTC**, end exclusive. This preserves the existing report schedule; it is not a midnight-based calendar week. The private `/stats` command takes a fresh sample and reports from the current reporting-week start to the request time. It shows exact dates and marks incomplete history when coverage is missing, counters reset or accounts change. A failed fresh read can still return the recorded history with an incomplete warning. When a reporting boundary falls between samples, the collector estimates the share of traffic on each side.
 
 Weekly reports cover the **completed** reporting week. They send shared accounts only to `allowed_chat_ids`. To send private accounts to the owner, create `/etc/xray/telegram_stats_private.json` using its example:
 
@@ -101,7 +101,7 @@ Dry runs do not send, sample or write delivery state. `--private` restricts the 
 
 ## Trends and the local Mac dashboard
 
-Both automatic weekly reports and interactive statistics append a comparison with the **same elapsed interval one week earlier**. Completed weekly reports compare two complete reporting weeks. The owner and group scopes remain separate. Percentages are withheld when either interval has incomplete history, resets, missing samples or missing users; a zero prior interval is reported explicitly instead of dividing by zero. The daily view covers seven UTC dates, ending at the report cutoff. A partial latest day is labeled; absent history remains unknown, never zero. The group command retains the original since-restart counters above the separate weekly trend section.
+Telegram shows the UTC period boundaries above a table of uploads, downloads, totals and percentage changes from the same elapsed interval last week. The shared command also shows live activity. The date line flags incomplete coverage. A dash marks an unavailable value or comparison. Daily charts and detailed coverage reasons remain in the Mac dashboard. Keep retired private IDs in the private reporting scope so their recorded usage stays private after their login is removed. Sampling just before and after a VPN restart preserves the recorded weekly traffic. The final unsampled interval may contain additional traffic.
 
 The router keeps a bounded 21-day cache in RAM, enough for the current and previous reporting weeks. No USB drive is required and there are no periodic traffic-history writes to internal flash. The optional Mac dashboard copies only counter readings, labels, process epochs and scope metadata over existing SSH. It does not copy bot configuration, authentication credentials, certificates or private keys. Pulling readings is read-only. The Mac also restores recent archived readings to RAM after a router reboot. Both operations use existing SSH; the minute sampling schedule is unchanged.
 

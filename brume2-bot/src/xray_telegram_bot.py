@@ -27,7 +27,7 @@ from urllib.parse import quote, urlencode
 import requests
 
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 
 XRAY_CONFIG = Path("/etc/xray/config.json")
 BOT_CONFIG = Path("/etc/xray/telegram_bot.json")
@@ -1490,7 +1490,7 @@ class TelegramClient:
             timeout=(10, timeout_seconds + 12),
         )
 
-    def send_message(self, chat_id, text, reply_to=None):
+    def send_message(self, chat_id, text, reply_to=None, *, table=False):
         chunks = []
         remaining = str(text)
         while remaining:
@@ -1504,6 +1504,12 @@ class TelegramClient:
             remaining = remaining[split_at:].lstrip("\n")
         for index, chunk in enumerate(chunks or [""]):
             payload = {"chat_id": str(chat_id), "text": chunk}
+            if table:
+                first, separator, body = chunk.partition("\n")
+                if separator and body:
+                    payload["entities"] = json.dumps([{"type": "pre",
+                        "offset": len((first + separator).encode("utf-16-le")) // 2,
+                        "length": len(body.encode("utf-16-le")) // 2}])
             if reply_to is not None and index == 0:
                 payload["reply_parameters"] = json.dumps({"message_id": reply_to})
             self.request("sendMessage", data=payload)
@@ -1569,7 +1575,7 @@ TELEGRAM_COMMANDS = [
     {"command": "hysteria", "description": "Export pinned Hysteria 2 JSON profiles; optional user label"},
     {"command": "qr", "description": "Generate a local Hysteria 2 QR for an existing user"},
     {"command": "hylinks", "description": "Export Hysteria 2 import links; optional user label"},
-    {"command": "stats", "description": "Hysteria 2 counters and weekly trends; optional user label"},
+    {"command": "stats", "description": "Current-week traffic and connections; optional user label"},
     {"command": "status", "description": "Show Hysteria 2 service and statistics API health"},
     {"command": "help", "description": "Show command help"},
 ]
@@ -1580,7 +1586,7 @@ HELP_TEXT = """Brume 2 VPN commands
 /hysteria [user] — export pinned Hysteria 2 client profiles as JSON
 /hylinks [user] — export Hysteria 2 import links; phone import is unverified
 /qr user — get an existing user Hysteria 2 QR
-/stats [user] — show Hysteria 2 counters, connections and weekly trends
+/stats [user] — show this reporting week’s traffic, connections and change from last week
 /status — show Hysteria 2 service and statistics API health
 /help — show this help"""
 
@@ -1799,49 +1805,31 @@ class Bot:
             not PROFILE_LABEL_RE.fullmatch(arguments[0]) or UUID_RE.search(arguments[0])
         )):
             raise UserError("Usage: /stats [user label]")
-        if chat_id == self.settings.private_owner_id:
-            selected = self.settings.private_hysteria_users
-            if arguments:
-                name = arguments[0].casefold()
-                if name not in selected:
-                    raise UserError("Only configured private users are available in this chat")
-                selected = frozenset({name})
-            try:
-                import vpn_usage_history as history
-                now = utc_now()
-                try:
-                    fresh = history.sample_once()
-                except Exception:
-                    fresh = False
-                summary = history.render_current_week(now, included_users=selected)
-                if not fresh:
-                    summary = "INCOMPLETE HISTORY: fresh counters unavailable.\n" + summary
-            except Exception:
-                raise UserError("Weekly usage history is unavailable") from None
-            self.telegram.send_message(chat_id, summary, reply_to)
-            return
-        try:
-            import vpn_user_stats
-        except ImportError as exc:
-            raise OperationError("The statistics helper is not installed") from exc
         import vpn_usage_history as history
-        trend_now = utc_now()
+        import vpn_user_stats
+        private = chat_id == self.settings.private_owner_id
+        selected = self.settings.private_hysteria_users
+        if private and arguments:
+            query = arguments[0].casefold()
+            if query not in selected:
+                raise UserError("Only configured private users are available in this chat")
+            selected = frozenset({query})
+        now = utc_now()
         try:
             fresh = history.sample_once()
         except Exception:
             fresh = False
         try:
-            summary = vpn_user_stats.render_summary(
-                arguments[0] if arguments else None, compact=True,
-                vmess_enabled=self.settings.vmess_enabled,
-                excluded_hysteria_users=self.settings.private_hysteria_users,
-                trend_now=trend_now,
-            )
-        except vpn_user_stats.StatsError:
-            raise UserError("Statistics are unavailable or the user label was not found")
-        if not fresh:
-            summary = "INCOMPLETE HISTORY: fresh counters unavailable.\n" + summary
-        self.telegram.send_message(chat_id, summary, reply_to)
+            if private:
+                summary = history.render_current_week(now, included_users=selected, fresh=fresh)
+            else:
+                summary = vpn_user_stats.render_group_week(now, arguments[0] if arguments else None,
+                    self.settings.vmess_enabled, selected, fresh)
+        except history.AccountNotFound:
+            raise UserError("Statistics are unavailable or the user label was not found") from None
+        except Exception:
+            raise UserError("Weekly usage history is unavailable") from None
+        self.telegram.send_message(chat_id, summary, reply_to, table=True)
 
     def command_rotate(self, message, arguments):
         self.require_vmess()

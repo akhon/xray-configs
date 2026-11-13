@@ -55,7 +55,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.send(),0);self.assertEqual(self.tc.send_message.call_count,2)
     def test_private_recipient_mismatch_blocks_only_private_and_retries(self):
         self.tc.request.return_value={'id':123,'type':'private','username':'someone_else'}
-        self.assertEqual(self.send(),1);self.tc.send_message.assert_called_once_with(-100,'dan+maria+kate')
+        self.assertEqual(self.send(),1);self.tc.send_message.assert_called_once_with(-100,'dan+maria+kate',table=True)
         self.tc.request.return_value={'id':123,'type':'private','username':'owner_example'}
         self.assertEqual(self.send(),0);self.assertEqual(self.tc.send_message.call_count,2)
         self.assertEqual(self.tc.send_message.call_args.args,(123,'private-a+private-b'))
@@ -66,7 +66,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.send(),0);self.assertEqual(self.tc.send_message.call_count,3)
         self.assertEqual(self.tc.send_message.call_args.args,(123,'private-a+private-b'))
     def test_private_only_never_sends_group(self):
-        self.assertEqual(self.send(private_only=True),0);self.tc.send_message.assert_called_once_with(123,'private-a+private-b')
+        self.assertEqual(self.send(private_only=True),0);self.tc.send_message.assert_called_once_with(123,'private-a+private-b',table=True)
     def test_bad_route_rejected_before_any_send(self):
         report.PRIVATE_CONFIG_FILE.write_text(json.dumps({**self.route,'chat_id':456}))
         with self.assertRaises(report.ReportError):self.send()
@@ -84,13 +84,13 @@ class HistoryFilterTests(unittest.TestCase):
         with patch.object(hist,'read_samples',return_value=source):
             general=hist.render_report(end,enabled=False,excluded_users={'private-a','private-b'})
             private=hist.render_report(end,enabled=False,included_users={'private-a','private-b'})
-        self.assertIn('dan | up 300 B',general);self.assertNotIn('G alias',general);self.assertNotIn('L alias',general)
-        self.assertIn('G alias | up 100 B',private);self.assertIn('L alias | up 200 B',private);self.assertNotIn('dan',private)
-        self.assertIn('2026-10-19 14:00:00 UTC -> 2026-10-26 14:00:00 UTC',private)
+        self.assertRegex(general, r'dan\s+300 B');self.assertNotIn('G alias',general);self.assertNotIn('L alias',general)
+        self.assertRegex(private, r'G alias\s+100 B');self.assertRegex(private, r'L alias\s+200 B');self.assertNotIn('dan',private)
+        self.assertIn('2026-10-19 14:00:00 → 2026-10-26 14:00:00 UTC',private)
     def test_partial_week_and_missing_history_explicit(self):
         a=dt.datetime(2026,10,19,14,tzinfo=hist.UTC);b=dt.datetime(2026,10,25,6,tzinfo=hist.UTC)
         with patch.object(hist,'read_samples',return_value={}):
             msg=hist.render_report(enabled=False,included_users={'private-a','private-b'},interval=(a,b))
-        self.assertIn('partial reporting week',msg);self.assertIn('INCOMPLETE HISTORY',msg);self.assertIn('Users: private-a, private-b',msg)
+        self.assertIn('неполные данные',msg);self.assertIn('нет данных',msg);self.assertEqual(len(msg.splitlines()),3)
 
 if __name__=='__main__':unittest.main(verbosity=2)

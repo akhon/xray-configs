@@ -154,7 +154,7 @@ def send_weekly_report(dry_run=False, force=False, now=None, private_only=False)
                 if private:
                     verify_private_recipient(telegram, route)
                 message = report_text(stats, now, private=private, settings=settings)
-                telegram.send_message(chat, message)
+                telegram.send_message(chat, message, table=True)
             except Exception:
                 failures += 1
                 continue

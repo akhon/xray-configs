@@ -24,6 +24,10 @@ class HistoryError(Exception):
     pass
 
 
+class AccountNotFound(HistoryError):
+    pass
+
+
 def period(now=None):
     now = now or dt.datetime.now(UTC)
     if now.tzinfo is None:
@@ -218,68 +222,76 @@ def stamp(value):
     return dt.datetime.fromtimestamp(value, UTC).strftime('%Y-%m-%d %H:%M:%S')
 
 
-def render_report(now=None, path=DB_FILE, enabled=None, included_users=None, excluded_users=(), interval=None):
+def _table(start, end, rows, partial=False, show_online=False):
+    # Telegram uses a preformatted entity for the table; dry runs stay plain text.
+    dates = '%s → %s UTC' % (stamp(start.timestamp()), stamp(end.timestamp()))
+    if partial:
+        dates += ' · неполные данные'
+    headers = ['Кто', '↑', '↓', 'Всего', 'Δ нед.'] + (['Онл.'] if show_online else [])
+    if not rows:
+        rows = [['нет данных'] + ['—'] * (len(headers)-1)]
+    widths = [max(len(row[i]) for row in [headers] + rows) for i in range(len(headers))]
+    def line(row):
+        return '  '.join([row[0].ljust(widths[0])] +
+                         [value.rjust(width) for value, width in zip(row[1:], widths[1:])]).rstrip()
+    lines = [dates, line(headers)]
+    units = sum(len(s.encode('utf-16-le')) // 2 + 1 for s in lines)
+    for i, row in enumerate(rows):
+        text = line(row)
+        size = len(text.encode('utf-16-le')) // 2 + 1
+        if units + size > 3800:
+            lines.append('… ещё %d' % (len(rows)-i))
+            break
+        lines.append(text)
+        units += size
+    return '\n'.join(lines)
+
+
+def render_report(now=None, path=DB_FILE, enabled=None, included_users=None, excluded_users=(),
+                  interval=None, fresh=True, online=None, label_filter=None):
     from xray_user_stats import human_bytes
     from vpn_features import load_vmess_enabled
+    from vpn_usage_trends import build_trends
     start, end = period(now) if interval is None else interval
-    if start.tzinfo is None or end.tzinfo is None or end <= start:
-        raise HistoryError("Invalid reporting interval")
-    a, b = start.timestamp(), end.timestamp()
-    included = None if included_users is None else {u.casefold() for u in included_users}
-    excluded = {u.casefold() for u in excluded_users}
-    protocols = ['Hysteria 2']
-    if load_vmess_enabled() if enabled is None else enabled:
-        protocols.append('Xray')
-    source = read_samples(path, a, b)
-    lines = ['Weekly VPN usage' if interval is None else 'VPN usage — partial reporting week',
-             'Period: %s UTC -> %s UTC (end exclusive)' % (stamp(a), stamp(b))]
-    if included is not None:
-        lines.append('Users: ' + ', '.join(sorted(included)))
-    for protocol in protocols:
-        samples = source.get(protocol, [])
-        if protocol == 'Hysteria 2':
-            # Filter raw account IDs before accounting, including aliases and history.
-            samples = [(t, epoch, {key: row for key, row in counters.items()
-                        if key.casefold() not in excluded
-                        and (included is None or key.casefold() in included)}, error)
-                       for t, epoch, counters, error in samples]
-        result = summarize(samples, a, b)
-        lines.extend(['', protocol + ' — ' + ('INCOMPLETE HISTORY' if result['reasons'] else 'sampled weekly usage')])
-        if result['coverage']:
-            lines.append('Observed: %s -> %s UTC' % tuple(stamp(t) for t in result['coverage']))
-        if result['reasons']:
-            lines.append('Reasons: ' + '; '.join(sorted(result['reasons'])) + '.')
-            lines.append('Only observed usage is shown; missing traffic is unknown.')
-        if result['estimated']:
-            lines.append('Week-boundary allocation is estimated between adjacent samples.')
-        rows = sorted(result['totals'].values(), key=lambda row: row['label'].casefold())
-        if not rows:
-            lines.append('Usage unavailable; no recoverable readings for this period.')
-        for row in rows:
-            lines.append('%s | up %s | down %s | total %s' %
-                         (row['label'], human_bytes(row['up']), human_bytes(row['down']), human_bytes(row['up']+row['down'])))
-    lines.extend(['', 'One-minute counter deltas; resets never count prior cumulative traffic.',
-                  'An API reset entirely between samples may be undetectable.'])
-    from vpn_usage_trends import build_trends, render_trends
-    trends = build_trends(start, end, path=path, enabled='Xray' in protocols,
-                          included_users=included_users, excluded_users=excluded_users)
-    lines.extend(['', render_trends(trends)])
-    message = '\n'.join(lines)
-    if len(message) > 3800:
-        message = message[:3630].rsplit('\n', 1)[0] + '\nAdditional rows omitted; full history remains on the router.'
-    return message
+    if start.tzinfo is None or end.tzinfo is None or end < start:
+        raise HistoryError('Invalid reporting interval')
+    if start == end:
+        return _table(start, end, [], show_online=online is not None)
+    trends = build_trends(start, end, path=path,
+        enabled=load_vmess_enabled() if enabled is None else enabled, included_users=included_users,
+        excluded_users=excluded_users, label_filter=label_filter, include_days=False)
+    rows, partial = [], not fresh
+    for protocol in trends['protocols']:
+        name = protocol['name']
+        partial |= not protocol['current']['complete']
+        activity = (online or {}).get(name, {})
+        # Retired users with usage in this interval stay visible. Prior-week-only
+        # users do not create artificial zero rows in future reports.
+        data = [(r['label'], r) for r in protocol['users'] if r['current'] is not None]
+        labels = {label for label, _ in data}
+        data.extend((label, None) for label in activity if label not in labels)
+        for label, r in sorted(data, key=lambda pair: pair[0].casefold()):
+            display = name + '/' + label if len(trends['protocols']) > 1 else label
+            values = [human_bytes(r[k]) for k in ('up', 'down', 'current')] if r else ['—'] * 3
+            if not fresh or not r or r['status'] == 'incomplete':
+                change = '—'
+            elif r['status'] == 'new_usage':
+                change = 'с нуля'
+            else:
+                change = '%+.1f%%' % r['percent']
+            if r is None:
+                partial = True
+            rows.append([display] + values + [change] +
+                        ([str(activity.get(label, '—'))] if online is not None else []))
+    if label_filter and not rows:
+        raise AccountNotFound('No matching user label.')
+    return _table(start, end, rows, partial, online is not None)
 
 
-def render_current_week(now=None, path=DB_FILE, included_users=()):
+def render_current_week(now=None, path=DB_FILE, included_users=(), **kwargs):
     now = now or dt.datetime.now(UTC)
-    start = period(now)[1]
-    if now == start:
-        return ("VPN usage — current reporting week\n"
-                "Period: %s UTC -> %s UTC (end exclusive)\n"
-                "Users: %s\nNo time has elapsed in this reporting week."
-                % (stamp(start.timestamp()), stamp(now.timestamp()), ", ".join(sorted(included_users))))
-    return render_report(now, path=path, enabled=False, included_users=included_users,
-                         interval=(start, now))
+    return render_report(now, path=path, enabled=kwargs.pop('enabled', False), included_users=included_users,
+                         interval=(period(now)[1], now), **kwargs)
 
 
 def main():
