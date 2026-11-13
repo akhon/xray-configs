@@ -11,7 +11,7 @@ The goal of this repo:
 
 ## Contents
 
-- `brume2-bot/` — Telegram bot, Streisand JSON exports, per-user statistics, and weekly reports ([documentation](brume2-bot/README.md))
+- `brume2-bot/` — Telegram bot, Hysteria QR/client exports, private weekly statistics, trends and a local dashboard, and optional legacy Xray support ([documentation](brume2-bot/README.md))
 - `xray-core-vless-reality.json` — VLESS + REALITY (experimental, environment-dependent)
 - `xray-core-vmess-ja3-working.json` — VMess + TLS (JA3 / HTTPS camouflage, working setup)
 - `xray-core-vmess-working.json` — VMess + TCP without TLS (baseline, most stable)
@@ -20,32 +20,24 @@ The goal of this repo:
 
 ## Brume 2 Telegram bot and user statistics
 
-The [bot package](brume2-bot/README.md) adds Telegram management, Streisand JSON export, per-user traffic statistics, and weekly reports to an existing OpenWrt Xray installation.
+The [bot package](brume2-bot/README.md) manages an existing OpenWrt Hysteria 2 installation, with optional legacy Xray support.
 
-- `/stats` or `/stats alice` reports upload, download, total traffic, and recent request activity.
-- `/streisand` or `/streisand alice` exports complete client profiles as JSON.
-- `/links` or `/links alice` provides a secondary VMess/VLESS share-link text format.
-- `/ip`, `/status`, `/restart`, `/rotate`, `/target`, and `/tlsping` provide allowlisted administration.
-- A router cron job can publish a weekly statistics snapshot to the authorized Telegram chats.
+- One configured owner can use private `/stats` for the current reporting week and the common commands.
+- Authorized groups retain shared-user statistics; private accounts are excluded from their traffic reports and all Telegram credential exports.
+- `/qr label` generates a standard Hysteria 2 URI QR locally, with a profile name and certificate pin.
+- One-minute history with a durable Mac archive and a RAM-only router cache produces actual weekly usage, with reset/gap warnings and exact reporting dates. The reporting week starts Monday 14:00 UTC.
+- Like-for-like weekly comparisons and daily charts keep incomplete history visible; an optional loopback dashboard archives counters on the Mac over SSH and restores the router’s temporary history after reboot.
+- Group/sender allowlists and a separate private owner ID enforce access. Telegram cannot create VPN users.
 
-Each person needs a separate credential for separate counters. The migration helper can add individual profiles while preserving an existing shared UUID. Configuration changes use validation, backups, atomic writes, and rollback.
+Updated Hysteria server, bot, private-report and cron **examples** are in `brume2-bot/examples/`. They use placeholders; keep actual passwords, Telegram tokens, keys, personal IDs and client profiles on the router or in an authorized private delivery channel.
 
-Traffic counters are cumulative since Xray's last restart; the online indicator describes recent activity, not an exact active-session count. StatsService is accessible only on the router's loopback interface.
-
-After installation on the router:
-
-```sh
-xray-user-stats
-xray-user-stats alice
-```
-
-Run the package tests from this repository:
+Run tests with:
 
 ```sh
 python3 -m unittest discover -s brume2-bot/tests -v
 ```
 
-See the [package README](brume2-bot/README.md) for installation, access controls, safe migration, certificate-pinned JSON exports, and the weekly schedule. Keep populated router configurations, generated client profiles, keys, tokens, and private deployment notes out of this public repository.
+See the [package README](brume2-bot/README.md) for installation, access rules, TLS/QR compatibility, history limitations, legacy migration and validation.
 
 ---
 

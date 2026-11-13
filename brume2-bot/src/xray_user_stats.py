@@ -350,7 +350,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 def main(argv=None):
     parser = _ArgumentParser(description="Read Xray user traffic and recent activity without resetting counters.")
-    parser.add_argument("user", nargs="?", help="exact label or person prefix (for example alice)")
+    parser.add_argument("user", nargs="?", help="exact label or person prefix (for example dan)")
     args = parser.parse_args(argv)
     try:
         print(render_summary(args.user, compact=False))

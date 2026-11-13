@@ -63,3 +63,22 @@ id_*
 *~
 DEPLOYMENT.md
 deployment.local.*
+
+# Hysteria credentials, personal routes, traffic history and generated QR images
+telegram_stats_private.json
+client-meta.json
+user-labels.json
+*.sqlite3
+*.sqlite3-*
+*.db
+*-hiddify*.json
+*-hiddify*.png
+*-qr.png
+*-credentials.txt
+*-native.json
+*-client.zip
+
+# Local dashboard archive and scope metadata
+dashboard-data/
+usage-archive/
+sync.json

@@ -1,0 +1,583 @@
+diff --git a/app/cmd/root.go b/app/cmd/root.go
+index db70a57..b969aa0 100644
+--- a/app/cmd/root.go
++++ b/app/cmd/root.go
+@@ -45,7 +45,7 @@ var (
+ 		"CommitHash:\t%s\n"+
+ 		"Platform:\t%s\n"+
+ 		"Architecture:\t%s\n"+
+-		"Libraries:\tquic-go=%s",
++		"Libraries:\tquic-go=%s\nFeatures:\tmaxSessionsPerUser/v1",
+ 		appVersion, appDate, appType, appToolchain, appCommit, appPlatform, appArch, libVersion)
+ 
+ 	appAboutLong = fmt.Sprintf("%s\n%s\n%s\n\n%s", appLogo, appDesc, appAuthors, appVersionLong)
+diff --git a/app/cmd/server.go b/app/cmd/server.go
+index 064804e..29e0105 100644
+--- a/app/cmd/server.go
++++ b/app/cmd/server.go
+@@ -72,6 +72,7 @@ func init() {
+ }
+ 
+ type serverConfig struct {
++	MaxSessionsPerUser    int                         `mapstructure:"maxSessionsPerUser"`
+ 	Listen                string                      `mapstructure:"listen"`
+ 	Realm                 serverConfigRealm           `mapstructure:"realm"`
+ 	Obfs                  serverConfigObfs            `mapstructure:"obfs"`
+@@ -1456,6 +1457,10 @@ func (c *serverConfig) fillUDPIdleTimeout(hyConfig *server.Config) error {
+ }
+ 
+ func (c *serverConfig) fillAuthenticator(hyConfig *server.Config) error {
++	if c.MaxSessionsPerUser < 0 {
++		return configError{Field: "maxSessionsPerUser", Err: errors.New("must be nonnegative")}
++	}
++	hyConfig.MaxSessionsPerUser = c.MaxSessionsPerUser
+ 	if c.Auth.Type == "" {
+ 		return configError{Field: "auth.type", Err: errors.New("empty auth type")}
+ 	}
+diff --git a/app/cmd/server_test.go b/app/cmd/server_test.go
+index 4ed5aa9..03fd383 100644
+--- a/app/cmd/server_test.go
++++ b/app/cmd/server_test.go
+@@ -24,7 +24,8 @@ func TestServerConfig(t *testing.T) {
+ 	assert.NoError(t, err)
+ 	assertAllFieldsSet(t, config, "server")
+ 	assert.Equal(t, config, serverConfig{
+-		Listen: ":8443",
++		MaxSessionsPerUser: 2,
++		Listen:             ":8443",
+ 		Realm: serverConfigRealm{
+ 			STUNServers:       []string{"stun1.example.com:3478", "stun2.example.com:3478"},
+ 			STUNTimeout:       6 * time.Second,
+diff --git a/app/cmd/server_test.yaml b/app/cmd/server_test.yaml
+index 2c0687c..fcf2c24 100644
+--- a/app/cmd/server_test.yaml
++++ b/app/cmd/server_test.yaml
+@@ -1,4 +1,5 @@
+ listen: :8443
++maxSessionsPerUser: 2
+ 
+ realm:
+   stunServers:
+diff --git a/app/cmd/session_limit_test.go b/app/cmd/session_limit_test.go
+new file mode 100644
+index 0000000..ee44769
+--- /dev/null
++++ b/app/cmd/session_limit_test.go
+@@ -0,0 +1,18 @@
++package cmd
++
++import (
++	"github.com/apernet/hysteria/core/v2/server"
++	"github.com/stretchr/testify/require"
++	"testing"
++)
++
++func TestServerSessionLimitConfiguration(t *testing.T) {
++	for _, limit := range []int{0, 2, 10} {
++		c := serverConfig{MaxSessionsPerUser: limit, Auth: serverConfigAuth{Type: "password", Password: "test-only"}}
++		out := &server.Config{}
++		require.NoError(t, c.fillAuthenticator(out))
++		require.Equal(t, limit, out.MaxSessionsPerUser)
++	}
++	c := serverConfig{MaxSessionsPerUser: -1}
++	require.Error(t, c.fillAuthenticator(&server.Config{}))
++}
+diff --git a/core/internal/integration_tests/session_limit_test.go b/core/internal/integration_tests/session_limit_test.go
+new file mode 100644
+index 0000000..5021c80
+--- /dev/null
++++ b/core/internal/integration_tests/session_limit_test.go
+@@ -0,0 +1,207 @@
++package integration_tests
++
++import (
++	"context"
++	"crypto/tls"
++	"io"
++	"net"
++	"net/http"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/apernet/hysteria/core/v2/client"
++	"github.com/apernet/hysteria/core/v2/internal/protocol"
++	"github.com/apernet/hysteria/core/v2/server"
++	"github.com/apernet/quic-go"
++	"github.com/apernet/quic-go/http3"
++	"github.com/stretchr/testify/require"
++)
++
++type sessionTestAuth struct{}
++
++func (sessionTestAuth) Authenticate(_ net.Addr, value string, _ uint64) (bool, string) {
++	value = strings.ToLower(value)
++	return value == "alice" || value == "bob", value
++}
++
++func sessionTestServer(t *testing.T, limit int) net.Addr {
++	return sessionTestServerWithAuth(t, limit, sessionTestAuth{})
++}
++
++func sessionTestServerWithAuth(t *testing.T, limit int, auth server.Authenticator) net.Addr {
++	t.Helper()
++	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
++	require.NoError(t, err)
++	s, err := server.NewServer(&server.Config{TLSConfig: serverTLSConfig(), Conn: conn,
++		Authenticator: auth, MaxSessionsPerUser: limit})
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = s.Close() })
++	go s.Serve()
++	return conn.LocalAddr()
++}
++
++func sessionTestHTTP(t *testing.T, addr net.Addr) (*quic.Conn, *http3.ClientConn) {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++	defer cancel()
++	conn, err := quic.DialAddr(ctx, addr.String(), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}, nil)
++	require.NoError(t, err)
++	t.Cleanup(func() { _ = conn.CloseWithError(0, "") })
++	transport := &http3.Transport{}
++	t.Cleanup(func() { _ = transport.Close() })
++	return conn, transport.NewClientConn(conn)
++}
++
++func sessionTestAuthRequest(value string) *http.Request {
++	req, _ := http.NewRequest(http.MethodPost, "https://"+protocol.URLHost+protocol.URLPath, nil)
++	protocol.AuthRequestToHeader(req.Header, protocol.AuthRequest{Auth: value})
++	return req
++}
++
++func TestSessionLimitRepeatedAuthReservesOnlyOnce(t *testing.T) {
++	addr := sessionTestServer(t, 2)
++	_, httpClient := sessionTestHTTP(t, addr)
++	for i := 0; i < 8; i++ {
++		resp, err := httpClient.RoundTrip(sessionTestAuthRequest("alice"))
++		require.NoError(t, err)
++		require.Equal(t, protocol.StatusAuthOK, resp.StatusCode)
++		resp.Body.Close()
++	}
++	second, err := sessionTestConnect(addr, "alice")
++	require.NoError(t, err)
++	defer second.Close()
++	_, err = sessionTestConnect(addr, "alice")
++	require.Error(t, err)
++}
++
++type sessionTestSlowAuth struct{ entered, resume chan struct{} }
++
++func (a sessionTestSlowAuth) Authenticate(_ net.Addr, value string, _ uint64) (bool, string) {
++	if value == "slow" {
++		close(a.entered)
++		<-a.resume
++	}
++	return true, "alice"
++}
++
++func TestSessionLimitDisconnectDuringAuthDoesNotLeak(t *testing.T) {
++	auth := sessionTestSlowAuth{make(chan struct{}), make(chan struct{})}
++	addr := sessionTestServerWithAuth(t, 2, auth)
++	conn, httpClient := sessionTestHTTP(t, addr)
++	done := make(chan error, 1)
++	go func() {
++		resp, err := httpClient.RoundTrip(sessionTestAuthRequest("slow"))
++		if resp != nil {
++			resp.Body.Close()
++		}
++		done <- err
++	}()
++	select {
++	case <-auth.entered:
++	case <-time.After(5 * time.Second):
++		t.Fatal("auth not entered")
++	}
++	require.NoError(t, conn.CloseWithError(0, ""))
++	close(auth.resume)
++	select {
++	case err := <-done:
++		require.Error(t, err)
++	case <-time.After(5 * time.Second):
++		t.Fatal("closed request did not finish")
++	}
++	var first client.Client
++	var err error
++	require.Eventually(t, func() bool { first, err = sessionTestConnect(addr, "alice"); return err == nil }, 5*time.Second, 20*time.Millisecond)
++	defer first.Close()
++	var second client.Client
++	require.Eventually(t, func() bool { second, err = sessionTestConnect(addr, "alice"); return err == nil }, 5*time.Second, 20*time.Millisecond)
++	defer second.Close()
++	_, err = sessionTestConnect(addr, "alice")
++	require.Error(t, err)
++}
++
++func sessionTestConnect(addr net.Addr, auth string) (client.Client, error) {
++	c, _, err := client.NewClient(&client.Config{ServerAddr: addr, Auth: auth,
++		TLSConfig: client.TLSConfig{InsecureSkipVerify: true}})
++	return c, err
++}
++
++func TestSessionLimitRealConnectionsAndRelease(t *testing.T) {
++	addr := sessionTestServer(t, 2)
++	first, err := sessionTestConnect(addr, "alice")
++	require.NoError(t, err)
++	defer first.Close()
++	second, err := sessionTestConnect(addr, "ALICE")
++	require.NoError(t, err)
++	defer second.Close()
++	_, err = sessionTestConnect(addr, "alice")
++	require.Error(t, err)
++	_, err = sessionTestConnect(addr, "wrong-password")
++	require.Error(t, err)
++	other, err := sessionTestConnect(addr, "bob")
++	require.NoError(t, err)
++	defer other.Close()
++	// Multiple proxy streams in one admitted client do not consume device slots.
++	echo, err := net.Listen("tcp", "127.0.0.1:0")
++	require.NoError(t, err)
++	e := &tcpEchoServer{Listener: echo}
++	defer e.Close()
++	go e.Serve()
++	for i := 0; i < 8; i++ {
++		stream, err := first.TCP(echo.Addr().String())
++		require.NoError(t, err)
++		require.NoError(t, stream.SetDeadline(time.Now().Add(5*time.Second)))
++		_, err = stream.Write([]byte("session still works"))
++		require.NoError(t, err)
++		got := make([]byte, len("session still works"))
++		_, err = io.ReadFull(stream, got)
++		require.NoError(t, err)
++		require.Equal(t, "session still works", string(got))
++		stream.Close()
++	}
++	first.Close()
++	var replacement client.Client
++	require.Eventually(t, func() bool { replacement, err = sessionTestConnect(addr, "alice"); return err == nil }, 5*time.Second, 50*time.Millisecond)
++	defer replacement.Close()
++	_, err = sessionTestConnect(addr, "alice")
++	require.Error(t, err)
++}
++
++func TestSessionLimitConcurrentRealHandshakes(t *testing.T) {
++	addr := sessionTestServer(t, 2)
++	var admitted atomic.Int64
++	var wg sync.WaitGroup
++	start := make(chan struct{})
++	successful := make(chan client.Client, 20)
++	for i := 0; i < 20; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			<-start
++			c, err := sessionTestConnect(addr, "alice")
++			if err == nil {
++				admitted.Add(1)
++				successful <- c
++			}
++		}()
++	}
++	close(start)
++	wg.Wait()
++	close(successful)
++	for c := range successful {
++		defer c.Close()
++	}
++	require.Equal(t, int64(2), admitted.Load())
++}
++
++func TestSessionLimitDisabledAllowsMoreThanTwo(t *testing.T) {
++	addr := sessionTestServer(t, 0)
++	for i := 0; i < 5; i++ {
++		c, err := sessionTestConnect(addr, "alice")
++		require.NoError(t, err)
++		defer c.Close()
++	}
++}
+diff --git a/core/internal/integration_tests/trafficlogger_test.go b/core/internal/integration_tests/trafficlogger_test.go
+index 841f4ff..cc8dc4d 100644
+--- a/core/internal/integration_tests/trafficlogger_test.go
++++ b/core/internal/integration_tests/trafficlogger_test.go
+@@ -8,6 +8,7 @@ import (
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/mock"
++	"github.com/stretchr/testify/require"
+ 
+ 	"github.com/apernet/hysteria/core/v2/client"
+ 	"github.com/apernet/hysteria/core/v2/internal/integration_tests/mocks"
+@@ -62,7 +63,10 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
+ 		return nil
+ 	})
+ 	serverOb.EXPECT().TCP(addr).Return(sobConn, nil).Once()
+-	trafficLogger.EXPECT().TraceStream(mock.Anything, mock.Anything).Return().Once()
++	traced := make(chan *server.StreamStats, 1)
++	trafficLogger.EXPECT().TraceStream(mock.Anything, mock.Anything).Run(func(_ server.HyStream, stats *server.StreamStats) {
++		traced <- stats
++	}).Return().Once()
+ 
+ 	conn, err := c.TCP(addr)
+ 	assert.NoError(t, err)
+@@ -96,6 +100,10 @@ func TestClientServerTrafficLoggerTCP(t *testing.T) {
+ 	// The client should be disconnected
+ 	_, err = c.TCP("whatever")
+ 	assert.Error(t, err)
++	// Testify formats captured pointer arguments at cleanup. Wait until the
++	// stream's final atomic store so reflection cannot race with its teardown.
++	stats := <-traced
++	require.Eventually(t, func() bool { return stats.State.Load() == server.StreamStateClosed }, 5*time.Second, time.Millisecond)
+ }
+ 
+ // TestClientServerTrafficLoggerUDP tests that the traffic logger is correctly called for UDP sessions,
+diff --git a/core/server/config.go b/core/server/config.go
+index 365e936..59c28d4 100644
+--- a/core/server/config.go
++++ b/core/server/config.go
+@@ -25,6 +25,8 @@ const (
+ )
+ 
+ type Config struct {
++	// MaxSessionsPerUser limits authenticated QUIC sessions per auth ID; zero is unlimited.
++	MaxSessionsPerUser    int
+ 	TLSConfig             TLSConfig
+ 	QUICConfig            QUICConfig
+ 	Conn                  net.PacketConn
+@@ -46,6 +48,9 @@ type Config struct {
+ // fill fills the fields that are not set by the user with default values when possible,
+ // and returns an error if the user has not set a required field, or if a field is invalid.
+ func (c *Config) fill() error {
++	if c.MaxSessionsPerUser < 0 {
++		return errors.ConfigError{Field: "MaxSessionsPerUser", Reason: "must be nonnegative"}
++	}
+ 	if len(c.TLSConfig.Certificates) == 0 && c.TLSConfig.GetCertificate == nil {
+ 		return errors.ConfigError{Field: "TLSConfig", Reason: "must set at least one of Certificates or GetCertificate"}
+ 	}
+diff --git a/core/server/server.go b/core/server/server.go
+index d2b1e24..8fd015a 100644
+--- a/core/server/server.go
++++ b/core/server/server.go
+@@ -8,6 +8,7 @@ import (
+ 	"math/rand"
+ 	"net/http"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/apernet/quic-go"
+@@ -94,10 +95,12 @@ func NewServer(config *Config) (Server, error) {
+ 		config:   config,
+ 		tr:       tr,
+ 		listener: listener,
++		sessions: newSessionLimiter(config.MaxSessionsPerUser),
+ 	}, nil
+ }
+ 
+ type serverImpl struct {
++	sessions *sessionLimiter
+ 	config   *Config
+ 	tr       *quic.Transport
+ 	listener *quic.Listener
+@@ -123,28 +126,43 @@ func (s *serverImpl) Close() error {
+ 
+ func (s *serverImpl) handleClient(conn *quic.Conn) {
+ 	handler := newH3sHandler(s.config, conn)
++	handler.sessions = s.sessions
+ 	h3s := http3.Server{
+ 		Handler:          handler,
+ 		StreamDispatcher: handler.ProxyStreamHijacker,
+ 	}
+ 	err := h3s.ServeQUICConn(conn)
+-	// If the client is authenticated, we need to log the disconnect event
+-	if handler.authenticated {
+-		if tl := s.config.TrafficLogger; tl != nil {
+-			tl.LogOnlineState(handler.authID, false)
++	handler.finish(err)
++}
++
++// finish closes the transport before returning its slot. Serialize against an
++// in-flight authentication so a disconnected client cannot leak a reservation.
++func (h *h3sHandler) finish(err error) {
++	_ = h.conn.CloseWithError(closeErrCodeOK, "")
++	h.authMutex.Lock()
++	defer h.authMutex.Unlock()
++	if h.closed {
++		return
++	}
++	h.closed = true
++	if h.authenticated.Load() {
++		defer h.sessions.release(h.authID)
++		if tl := h.config.TrafficLogger; tl != nil {
++			tl.LogOnlineState(h.authID, false)
+ 		}
+-		if el := s.config.EventLogger; el != nil {
+-			el.Disconnect(conn.RemoteAddr(), handler.authID, err)
++		if el := h.config.EventLogger; el != nil {
++			el.Disconnect(h.conn.RemoteAddr(), h.authID, err)
+ 		}
+ 	}
+-	_ = conn.CloseWithError(closeErrCodeOK, "")
+ }
+ 
+ type h3sHandler struct {
+ 	config *Config
+ 	conn   *quic.Conn
+ 
+-	authenticated bool
++	sessions      *sessionLimiter
++	closed        bool // protected by authMutex
++	authenticated atomic.Bool
+ 	authMutex     sync.Mutex
+ 	authID        string
+ 	connID        uint32 // a random id for dump streams
+@@ -164,7 +182,10 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 	if r.Method == http.MethodPost && r.Host == protocol.URLHost && r.URL.Path == protocol.URLPath {
+ 		h.authMutex.Lock()
+ 		defer h.authMutex.Unlock()
+-		if h.authenticated {
++		if h.closed {
++			return
++		}
++		if h.authenticated.Load() {
+ 			// Already authenticated
+ 			protocol.AuthResponseToHeader(w.Header(), protocol.AuthResponse{
+ 				UDPEnabled: !h.config.DisableUDP,
+@@ -177,10 +198,10 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 		authReq := protocol.AuthRequestFromHeader(r.Header)
+ 		actualTx := authReq.Rx
+ 		ok, id := h.config.Authenticator.Authenticate(h.conn.RemoteAddr(), authReq.Auth, actualTx)
+-		if ok {
+-			// Set authenticated flag
+-			h.authenticated = true
++		if ok && h.conn.Context().Err() == nil && h.sessions.acquire(id) {
++			// Publish the auth ID only after a session slot is reserved.
+ 			h.authID = id
++			h.authenticated.Store(true)
+ 			if h.config.IgnoreClientBandwidth {
+ 				// Ignore client bandwidth and use the configured congestion controller.
+ 				congestion.UseConfigured(h.conn, h.config.CongestionConfig.Type, h.config.CongestionConfig.BBRProfile)
+@@ -238,7 +259,7 @@ func (h *h3sHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ }
+ 
+ func (h *h3sHandler) ProxyStreamHijacker(ft http3.FrameType, stream *quic.Stream, err error) (bool, error) {
+-	if err != nil || !h.authenticated {
++	if err != nil || !h.authenticated.Load() {
+ 		return false, nil
+ 	}
+ 
+diff --git a/core/server/session_limit.go b/core/server/session_limit.go
+new file mode 100644
+index 0000000..784fcbc
+--- /dev/null
++++ b/core/server/session_limit.go
+@@ -0,0 +1,44 @@
++package server
++
++import "sync"
++
++// sessionLimiter owns only in-memory counts. Slots are reserved before auth
++// succeeds and released by the same connection's teardown, never by polling.
++type sessionLimiter struct {
++	mu     sync.Mutex
++	max    int
++	active map[string]int
++}
++
++func newSessionLimiter(max int) *sessionLimiter {
++	if max == 0 {
++		return nil
++	}
++	return &sessionLimiter{max: max, active: make(map[string]int)}
++}
++
++func (l *sessionLimiter) acquire(id string) bool {
++	if l == nil {
++		return true
++	}
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.active[id] >= l.max {
++		return false
++	}
++	l.active[id]++
++	return true
++}
++
++func (l *sessionLimiter) release(id string) {
++	if l == nil {
++		return
++	}
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.active[id] <= 1 {
++		delete(l.active, id)
++	} else {
++		l.active[id]--
++	}
++}
+diff --git a/core/server/session_limit_test.go b/core/server/session_limit_test.go
+new file mode 100644
+index 0000000..e6a0e21
+--- /dev/null
++++ b/core/server/session_limit_test.go
+@@ -0,0 +1,60 @@
++package server
++
++import (
++	"sync"
++	"sync/atomic"
++	"testing"
++)
++
++func TestSessionLimitConcurrentAdmission(t *testing.T) {
++	l := newSessionLimiter(2)
++	var accepted atomic.Int64
++	var wg sync.WaitGroup
++	start := make(chan struct{})
++	for i := 0; i < 200; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			<-start
++			if l.acquire("alice") {
++				accepted.Add(1)
++			}
++		}()
++	}
++	close(start)
++	wg.Wait()
++	if accepted.Load() != 2 {
++		t.Fatalf("accepted %d concurrent sessions", accepted.Load())
++	}
++	if !l.acquire("bob") || !l.acquire("bob") || l.acquire("bob") {
++		t.Fatal("accounts share a limit")
++	}
++	l.release("alice")
++	if !l.acquire("alice") || l.acquire("alice") {
++		t.Fatal("released slot was not reusable exactly once")
++	}
++	l.release("alice")
++	l.release("alice")
++	l.release("bob")
++	l.release("bob")
++	if len(l.active) != 0 {
++		t.Fatal("empty account counters were retained")
++	}
++}
++
++func TestSessionLimitZeroPreservesUnlimitedBehavior(t *testing.T) {
++	l := newSessionLimiter(0)
++	for i := 0; i < 100; i++ {
++		if !l.acquire("alice") {
++			t.Fatal("zero limit denied session")
++		}
++	}
++	l.release("alice")
++}
++
++func TestSessionLimitNegativeConfigurationRejected(t *testing.T) {
++	c := &Config{MaxSessionsPerUser: -1}
++	if err := c.fill(); err == nil {
++		t.Fatal("negative limit accepted")
++	}
++}

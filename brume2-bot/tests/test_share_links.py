@@ -136,11 +136,11 @@ class ShareLinksTest(unittest.TestCase):
 class ShareLinksHandlerTest(unittest.TestCase):
     def setUp(self):
         self.bot = BOT.Bot.__new__(BOT.Bot)
-        self.bot.settings = BOT.Settings("test-placeholder", frozenset({100}), frozenset({200}))
+        self.bot.settings = BOT.Settings("test-placeholder", frozenset({-100}), frozenset({200}), True)
         self.bot.telegram = mock.Mock()
         self.bot.bot_username = "test_bot"
         self.message = {
-            "chat": {"id": 100}, "from": {"id": 200}, "message_id": 1,
+            "chat": {"id": -100, "type": "supergroup"}, "from": {"id": 200}, "message_id": 1,
             "text": "/links alice",
         }
 
@@ -152,7 +152,7 @@ class ShareLinksHandlerTest(unittest.TestCase):
             self.bot.handle_message(self.message)
         builder.assert_called_once_with(cfg, "192.0.2.1", "alice")
         call = self.bot.telegram.send_document.call_args.args
-        self.assertEqual(call[:3], (100, "brume2-streisand-links.txt", "vmess://test\n"))
+        self.assertEqual(call[:3], (-100, "brume2-streisand-links.txt", "vmess://test\n"))
         self.assertIn("/streisand [label] JSON", call[3])
         self.assertIn("keep TLS verification enabled", call[3])
         self.assertEqual(call[4], "text/plain")
